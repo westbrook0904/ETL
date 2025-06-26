@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.mapper.LoadTaskMapper">
+    <!-- 查询加载任务 -->
+    <select id="getTaskById" resultMap="taskResultMap">
+        SELECT * FROM load_task WHERE id = #{id}
+    </select>
+    
+    <select id="getTaskByCode" resultMap="taskResultMap">
+        SELECT * FROM load_task WHERE task_code = #{taskCode}
+    </select>
+    
+    <select id="getAllTasks" resultMap="taskResultMap">
+        SELECT * FROM load_task
+    </select>
+    
+    <!-- 查询字段映射 -->
+    <select id="getFieldMappingsByTaskId" resultType="com.example.entity.FieldMapping">
+        SELECT * FROM field_mapping WHERE task_id = #{taskId} ORDER BY sort_order
+    </select>
+    
+    <!-- 查询条件配置 -->
+    <select id="getConditionsByTaskId" resultType="com.example.entity.ConditionConfig">
+        SELECT * FROM condition_config WHERE task_id = #{taskId} ORDER BY condition_order
+    </select>
+    
+    <!-- 执行动态SQL -->
+    <update id="executeInsertSql">
+        ${sql}
+    </update>
+    
+    <update id="executeUpdateSql">
+        ${sql}
+    </update>
+    
+    <update id="executeDeleteSql">
+        ${sql}
+    </update>
+    
+    <!-- 结果映射 -->
+    <resultMap id="taskResultMap" type="com.example.entity.LoadTask">
+        <id property="id" column="id" />
+        <result property="taskName" column="task_name" />
+        <result property="taskCode" column="task_code" />
+        <result property="targetTable" column="target_table" />
+        <result property="operationType" column="operation_type" />
+        <result property="description" column="description" />
+        <result property="status" column="status" />
+        <result property="createTime" column="create_time" />
+        <result property="updateTime" column="update_time" />
+    </resultMap>
+</mapper>
