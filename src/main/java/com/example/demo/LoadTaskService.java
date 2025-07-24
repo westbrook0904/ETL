@@ -488,3 +488,88 @@ public class DataLoaderService {
         public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     }
 }
+ // ==================== 核心批处理方法 ====================
+    
+    /**
+     * 批处理核心方法
+     */
+    private int processBatch(LoaderConfig config, List<Map<String, Object>> batch) {
+        if (batch.isEmpty()) {
+            return 0;
+        }
+        
+        String operationType = config.getLoadType().getValue().toUpperCase();
+        
+        switch (operationType) {
+            case "INSERT":
+                return processBatchInsert(config, batch);
+            case "UPDATE":
+                return processBatchUpdate(config, batch);
+            case "UPSERT":
+                return processBatchUpsert(config, batch);
+            case "DELETE":
+                return processBatchDelete(config, batch);
+            default:
+                throw new IllegalArgumentException("Unsupported operation type: " + operationType);
+        }
+    }
+    
+    /**
+     * 批量插入 - 使用<foreach>标签
+     */
+    private int processBatchInsert(LoaderConfig config, List<Map<String, Object>> batch) {
+        List<String> fields = extractFields(config);
+        List<Map<String, Object>> paramsList = buildParametersList(config, batch);
+        
+        return dataLoaderMapper.batchInsertWithKeys(
+            config.getTableName(), 
+            fields, 
+            paramsList
+        );
+    }
+    
+    /**
+     * 批量更新 - 使用<foreach>标签
+     */
+    private int processBatchUpdate(LoaderConfig config, List<Map<String, Object>> batch) {
+        List<String> fields = extractFields(config);
+        List<String> primaryKeys = extractPrimaryKeys(config);
+        List<Map<String, Object>> paramsList = buildParametersList(config, batch);
+        
+        return dataLoaderMapper.batchUpdate(
+            config.getTableName(), 
+            fields, 
+            primaryKeys, 
+            paramsList
+        );
+    }
+    
+    /**
+     * 批量UPSERT - 使用<foreach>标签
+     */
+    private int processBatchUpsert(LoaderConfig config, List<Map<String, Object>> batch) {
+        List<String> fields = extractFields(config);
+        List<String> primaryKeys = extractPrimaryKeys(config);
+        List<Map<String, Object>> paramsList = buildParametersList(config, batch);
+        
+        return dataLoaderMapper.batchUpsert(
+            config.getTableName(), 
+            fields, 
+            primaryKeys, 
+            paramsList
+        );
+    }
+    
+    /**
+     * 批量删除 - 使用<foreach>标签
+     */
+    private int processBatchDelete(LoaderConfig config, List<Map<String, Object>> batch) {
+        List<String> primaryKeys = extractPrimaryKeys(config);
+        List<Map<String, Object>> paramsList = buildParametersList(config, batch);
+        
+        return dataLoaderMapper.batchDelete(
+            config.getTableName(), 
+            primaryKeys, 
+            paramsList
+        );
+    }
