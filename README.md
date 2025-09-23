@@ -1,99 +1,457 @@
-# ETL
-抽取组件过滤条件的组合模式设计
-设计背景
-在ETL管道的转换环节，不同字段往往需要根据多样化的业务规则进行映射转换，如：常量赋值、默认值、原值引用、数学运算、自定义函数等。为支撑多种计算规则并便于后续扩展，采用策略模式结合枚举类进行建模，实现计算逻辑的高度解耦和动态扩展。
+我来为您设计一个完整的ETL路由转换组件。这个组件需要支持配置管理、条件过滤和多路由输出。让我为您提供一个最佳实践的设计方案：
 
-2. 关键模型与机制设计
-2.1 枚举类定义
-MappingType枚举：明确描述各类映射计算类型（如CONSTANT、DEFAULT、SOURCE、ARITHMETIC、CUSTOM_FUNCTION等），为策略查找提供依据。
+## 1. 核心实体类设计
 
-2.2 策略接口定义
-ValueCalculator接口
+```java
+// 路由规则实体
+public class RouteRule {
+    private Long id;
+    private String downstreamId;  // 目标下游ID
+    private String ruleName;      // 规则名称
+    private List<FilterCondition> conditions;  // 过滤条件列表
+    private String logicOperator; // 条件间逻辑关系 (AND/OR)
+    private Integer priority;     // 优先级
+    private Boolean enabled;      // 是否启用
+    
+    // 构造函数、getter、setter...
+}
 
-定义标准方法calculate(context)，所有计算类型统一实现此方法。
+// 过滤条件实体
+public class FilterCondition {
+    private String fieldName;     // 字段名
+    private String operator;      // 操作符 (>, <, =, !=, LIKE, IN等)
+    private Object value;         // 比较值
+    private String dataType;      // 数据类型 (STRING, NUMBER, DATE等)
+    
+    // 构造函数、getter、setter...
+}
 
-输入参数通常为转换上下文，输出为计算后的值。
+// 路由结果实体
+public class RouteResult {
+    private String downstreamId;
+    private List<Map<String, Object>> data;
+    
+    public RouteResult(String downstreamId, List<Map<String, Object>> data) {
+        this.downstreamId = downstreamId;
+        this.data = data;
+    }
+    
+    // getter、setter...
+}
+```
 
-2.3 各类策略实现
-例如：
+## 2. 条件过滤引擎
 
-ConstantValueCalculator：常量值映射
+```java
+// 过滤条件操作符枚举
+public enum FilterOperator {
+    EQUAL("="),
+    NOT_EQUAL("!="),
+    GREATER_THAN(">"),
+    LESS_THAN("<"),
+    GREATER_EQUAL(">="),
+    LESS_EQUAL("<="),
+    LIKE("LIKE"),
+    IN("IN"),
+    NOT_IN("NOT_IN"),
+    IS_NULL("IS_NULL"),
+    IS_NOT_NULL("IS_NOT_NULL");
+    
+    private String operator;
+    
+    FilterOperator(String operator) {
+        this.operator = operator;
+    }
+    
+    public static FilterOperator fromString(String operator) {
+        for (FilterOperator op : values()) {
+            if (op.operator.equalsIgnoreCase(operator)) {
+                return op;
+            }
+        }
+        throw new IllegalArgumentException("不支持的操作符: " + operator);
+    }
+}
 
-DefaultValueCalculator：默认值赋值
+// 条件评估器
+@Component
+public class ConditionEvaluator {
+    
+    public boolean evaluate(Map<String, Object> record, FilterCondition condition) {
+        String fieldName = condition.getFieldName();
+        Object recordValue = record.get(fieldName);
+        Object conditionValue = condition.getValue();
+        FilterOperator operator = FilterOperator.fromString(condition.getOperator());
+        
+        return evaluateCondition(recordValue, conditionValue, operator, condition.getDataType());
+    }
+    
+    private boolean evaluateCondition(Object recordValue, Object conditionValue, 
+                                    FilterOperator operator, String dataType) {
+        switch (operator) {
+            case EQUAL:
+                return Objects.equals(recordValue, conditionValue);
+            case NOT_EQUAL:
+                return !Objects.equals(recordValue, conditionValue);
+            case GREATER_THAN:
+                return compareValues(recordValue, conditionValue, dataType) > 0;
+            case LESS_THAN:
+                return compareValues(recordValue, conditionValue, dataType) < 0;
+            case GREATER_EQUAL:
+                return compareValues(recordValue, conditionValue, dataType) >= 0;
+            case LESS_EQUAL:
+                return compareValues(recordValue, conditionValue, dataType) <= 0;
+            case LIKE:
+                return recordValue != null && recordValue.toString()
+                    .contains(conditionValue.toString());
+            case IN:
+                return conditionValue instanceof Collection && 
+                       ((Collection<?>) conditionValue).contains(recordValue);
+            case NOT_IN:
+                return !(conditionValue instanceof Collection && 
+                        ((Collection<?>) conditionValue).contains(recordValue));
+            case IS_NULL:
+                return recordValue == null;
+            case IS_NOT_NULL:
+                return recordValue != null;
+            default:
+                throw new IllegalArgumentException("不支持的操作符: " + operator);
+        }
+    }
+    
+    @SuppressWarnings("unchecked")
+    private int compareValues(Object value1, Object value2, String dataType) {
+        if (value1 == null || value2 == null) {
+            return value1 == null ? (value2 == null ? 0 : -1) : 1;
+        }
+        
+        switch (dataType.toUpperCase()) {
+            case "NUMBER":
+                BigDecimal bd1 = new BigDecimal(value1.toString());
+                BigDecimal bd2 = new BigDecimal(value2.toString());
+                return bd1.compareTo(bd2);
+            case "DATE":
+                Date date1 = parseDate(value1);
+                Date date2 = parseDate(value2);
+                return date1.compareTo(date2);
+            case "STRING":
+            default:
+                return value1.toString().compareTo(value2.toString());
+        }
+    }
+    
+    private Date parseDate(Object value) {
+        if (value instanceof Date) {
+            return (Date) value;
+        }
+        try {
+            return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(value.toString());
+        } catch (Exception e) {
+            try {
+                return new SimpleDateFormat("yyyy-MM-dd").parse(value.toString());
+            } catch (Exception ex) {
+                throw new IllegalArgumentException("无法解析日期: " + value);
+            }
+        }
+    }
+}
+```
 
-SourceValueCalculator：原字段值
+## 3. 核心路由转换组件
 
-ArithmeticValueCalculator：四则运算
+```java
+@Component
+public class DataRouter {
+    
+    @Autowired
+    private ConditionEvaluator conditionEvaluator;
+    
+    @Autowired
+    private RouteConfigService routeConfigService;
+    
+    /**
+     * 执行路由转换
+     * @param inputData 输入数据
+     * @return 路由结果列表
+     */
+    public List<RouteResult> route(List<Map<String, Object>> inputData) {
+        // 从数据库加载路由配置
+        List<RouteRule> routeRules = routeConfigService.getEnabledRouteRules();
+        
+        // 按优先级排序
+        routeRules.sort(Comparator.comparing(RouteRule::getPriority, 
+                                           Comparator.nullsLast(Comparator.naturalOrder())));
+        
+        Map<String, List<Map<String, Object>>> routeResults = new HashMap<>();
+        
+        // 对每条数据记录进行路由判断
+        for (Map<String, Object> record : inputData) {
+            for (RouteRule rule : routeRules) {
+                if (matchesRule(record, rule)) {
+                    routeResults.computeIfAbsent(rule.getDownstreamId(), 
+                                               k -> new ArrayList<>()).add(record);
+                    break; // 匹配到第一个规则后停止（根据优先级）
+                }
+            }
+        }
+        
+        // 转换为结果对象
+        return routeResults.entrySet().stream()
+                .map(entry -> new RouteResult(entry.getKey(), entry.getValue()))
+                .collect(Collectors.toList());
+    }
+    
+    /**
+     * 判断记录是否匹配规则
+     */
+    private boolean matchesRule(Map<String, Object> record, RouteRule rule) {
+        List<FilterCondition> conditions = rule.getConditions();
+        if (conditions == null || conditions.isEmpty()) {
+            return true; // 无条件则匹配所有
+        }
+        
+        String logicOperator = rule.getLogicOperator();
+        if ("OR".equalsIgnoreCase(logicOperator)) {
+            // OR逻辑：任一条件满足即可
+            return conditions.stream()
+                    .anyMatch(condition -> conditionEvaluator.evaluate(record, condition));
+        } else {
+            // AND逻辑（默认）：所有条件都要满足
+            return conditions.stream()
+                    .allMatch(condition -> conditionEvaluator.evaluate(record, condition));
+        }
+    }
+    
+    /**
+     * 支持多路由模式：一条记录可以匹配多个下游
+     */
+    public List<RouteResult> routeMultiple(List<Map<String, Object>> inputData) {
+        List<RouteRule> routeRules = routeConfigService.getEnabledRouteRules();
+        routeRules.sort(Comparator.comparing(RouteRule::getPriority, 
+                                           Comparator.nullsLast(Comparator.naturalOrder())));
+        
+        Map<String, List<Map<String, Object>>> routeResults = new HashMap<>();
+        
+        for (Map<String, Object> record : inputData) {
+            for (RouteRule rule : routeRules) {
+                if (matchesRule(record, rule)) {
+                    routeResults.computeIfAbsent(rule.getDownstreamId(), 
+                                               k -> new ArrayList<>()).add(record);
+                    // 不break，继续匹配其他规则
+                }
+            }
+        }
+        
+        return routeResults.entrySet().stream()
+                .map(entry -> new RouteResult(entry.getKey(), entry.getValue()))
+                .collect(Collectors.toList());
+    }
+}
+```
 
-CustomFunctionValueCalculator：自定义函数
+## 4. 配置管理服务
 
-实现要点
+```java
+@Service
+@Transactional
+public class RouteConfigService {
+    
+    @Autowired
+    private RouteRuleRepository routeRuleRepository;
+    
+    /**
+     * 保存路由规则配置
+     */
+    public RouteRule saveRouteRule(RouteRule routeRule) {
+        validateRouteRule(routeRule);
+        return routeRuleRepository.save(routeRule);
+    }
+    
+    /**
+     * 获取所有启用的路由规则
+     */
+    public List<RouteRule> getEnabledRouteRules() {
+        return routeRuleRepository.findByEnabledTrueOrderByPriorityAsc();
+    }
+    
+    /**
+     * 根据下游ID获取规则
+     */
+    public List<RouteRule> getRouteRulesByDownstreamId(String downstreamId) {
+        return routeRuleRepository.findByDownstreamIdAndEnabledTrue(downstreamId);
+    }
+    
+    /**
+     * 批量保存路由规则
+     */
+    public List<RouteRule> batchSaveRouteRules(List<RouteRule> routeRules) {
+        routeRules.forEach(this::validateRouteRule);
+        return routeRuleRepository.saveAll(routeRules);
+    }
+    
+    /**
+     * 删除路由规则
+     */
+    public void deleteRouteRule(Long id) {
+        routeRuleRepository.deleteById(id);
+    }
+    
+    /**
+     * 启用/禁用路由规则
+     */
+    public void toggleRouteRule(Long id, boolean enabled) {
+        RouteRule rule = routeRuleRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("规则不存在: " + id));
+        rule.setEnabled(enabled);
+        routeRuleRepository.save(rule);
+    }
+    
+    private void validateRouteRule(RouteRule routeRule) {
+        if (StringUtils.isEmpty(routeRule.getDownstreamId())) {
+            throw new IllegalArgumentException("下游ID不能为空");
+        }
+        
+        if (routeRule.getConditions() != null) {
+            for (FilterCondition condition : routeRule.getConditions()) {
+                if (StringUtils.isEmpty(condition.getFieldName())) {
+                    throw new IllegalArgumentException("字段名不能为空");
+                }
+                if (StringUtils.isEmpty(condition.getOperator())) {
+                    throw new IllegalArgumentException("操作符不能为空");
+                }
+            }
+        }
+    }
+}
 
-每个策略类实现ValueCalculator接口，封装独立计算逻辑。
+// JPA Repository接口
+@Repository
+public interface RouteRuleRepository extends JpaRepository<RouteRule, Long> {
+    List<RouteRule> findByEnabledTrueOrderByPriorityAsc();
+    List<RouteRule> findByDownstreamIdAndEnabledTrue(String downstreamId);
+}
+```
 
-实现InitializingBean接口，使得在IOC容器初始化完成后自动注册到工厂。
+## 5. 使用示例
 
-2.4 策略工厂模式
-CalculatorFactory工厂类
+```java
+@RestController
+@RequestMapping("/api/etl/router")
+public class DataRouterController {
+    
+    @Autowired
+    private DataRouter dataRouter;
+    
+    @Autowired
+    private RouteConfigService routeConfigService;
+    
+    /**
+     * 配置路由规则
+     */
+    @PostMapping("/config")
+    public ResponseEntity<String> configureRoutes(@RequestBody List<RouteRule> routeRules) {
+        try {
+            routeConfigService.batchSaveRouteRules(routeRules);
+            return ResponseEntity.ok("路由规则配置成功");
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("配置失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 执行数据路由
+     */
+    @PostMapping("/route")
+    public ResponseEntity<List<RouteResult>> routeData(
+            @RequestBody List<Map<String, Object>> inputData) {
+        try {
+            List<RouteResult> results = dataRouter.route(inputData);
+            return ResponseEntity.ok(results);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).build();
+        }
+    }
+    
+    /**
+     * 执行多路由模式
+     */
+    @PostMapping("/route-multiple")
+    public ResponseEntity<List<RouteResult>> routeDataMultiple(
+            @RequestBody List<Map<String, Object>> inputData) {
+        try {
+            List<RouteResult> results = dataRouter.routeMultiple(inputData);
+            return ResponseEntity.ok(results);
+        } catch (Exception e) {
+            return ResponseEntity.status(500).build();
+        }
+    }
+}
 
-负责所有策略类注册和查找。
+// 使用示例
+@Component
+public class ETLRouterDemo {
+    
+    @Autowired
+    private DataRouter dataRouter;
+    
+    @Autowired
+    private RouteConfigService routeConfigService;
+    
+    public void demonstrateUsage() {
+        // 1. 配置路由规则
+        List<RouteRule> rules = Arrays.asList(
+            createRouteRule("downstream-A", "age", ">", 18, "NUMBER"),
+            createRouteRule("downstream-B", "status", "=", "active", "STRING"),
+            createRouteRule("downstream-C", "amount", ">=", 1000, "NUMBER")
+        );
+        
+        routeConfigService.batchSaveRouteRules(rules);
+        
+        // 2. 准备测试数据
+        List<Map<String, Object>> inputData = Arrays.asList(
+            Map.of("id", 1, "age", 25, "status", "active", "amount", 1500),
+            Map.of("id", 2, "age", 16, "status", "inactive", "amount", 500),
+            Map.of("id", 3, "age", 30, "status", "active", "amount", 800)
+        );
+        
+        // 3. 执行路由
+        List<RouteResult> results = dataRouter.route(inputData);
+        
+        // 4. 输出结果
+        results.forEach(result -> {
+            System.out.println("下游ID: " + result.getDownstreamId());
+            System.out.println("数据条数: " + result.getData().size());
+            result.getData().forEach(System.out::println);
+        });
+    }
+    
+    private RouteRule createRouteRule(String downstreamId, String fieldName, 
+                                    String operator, Object value, String dataType) {
+        FilterCondition condition = new FilterCondition();
+        condition.setFieldName(fieldName);
+        condition.setOperator(operator);
+        condition.setValue(value);
+        condition.setDataType(dataType);
+        
+        RouteRule rule = new RouteRule();
+        rule.setDownstreamId(downstreamId);
+        rule.setConditions(Arrays.asList(condition));
+        rule.setLogicOperator("AND");
+        rule.setEnabled(true);
+        rule.setPriority(1);
+        
+        return rule;
+    }
+}
+```
 
-提供getCalculator(MappingType)方法，根据映射类型获取对应策略组件。
+## 主要特性
 
-注册方法为protected，仅包内可见，防止被外部误用，提高封装性和安全性。
+1. **灵活的条件配置**：支持多种比较操作符和数据类型
+2. **优先级控制**：按优先级顺序执行路由规则
+3. **逻辑操作符**：支持AND/OR组合条件
+4. **多路由模式**：支持单条记录匹配多个下游
+5. **配置持久化**：路由规则存储在数据库中
+6. **易于扩展**：模块化设计，便于添加新的操作符和功能
 
-3. 类结构与流程图建议
-3.1 UML类图
-lua
-复制
-编辑
-                    +----------------------+
-                    |  ValueCalculator     |
-                    +----------------------+
-                    | +calculate(ctx):val  |
-                    +----------------------+
-                              ^
-            +----------------+-------------------------------+
-            |        |         |        |                    |
-+----------------+ ... +------------------+    +-----------------------+
-| ConstantValue  |     | DefaultValue     |    | ArithmeticValue...    |
-| Calculator     |     | Calculator       |    | CustomFunction...     |
-+----------------+     +------------------+    +-----------------------+
-            ^                      ^                         ^
-            |                      |                         |
-         +-------------------------------------------------------+
-         |        InitializingBean（IOC注册生命周期）            |
-         +-------------------------------------------------------+
-
-+-------------------------------------------------------+
-| CalculatorFactory                                     |
-+-------------------------------------------------------+
-| - Map<MappingType, ValueCalculator> registry          |
-+-------------------------------------------------------+
-| + getCalculator(type: MappingType): ValueCalculator   |
-| # register(type, calculator)                          |
-+-------------------------------------------------------+
-3.2 策略选择与执行流程
-根据配置或业务需求获取映射类型（MappingType）。
-
-通过CalculatorFactory.getCalculator(MappingType)查找并获取对应策略组件。
-
-调用策略的calculate(context)方法，执行具体映射计算逻辑。
-
-返回转换后的值用于后续处理。
-
-4. 设计优势分析
-解耦与扩展性：各类计算策略独立封装，新增计算类型仅需扩展枚举及实现接口，无需影响现有逻辑。
-
-IOC自动注册：利用生命周期回调自动注册，避免手工维护映射关系。
-
-安全性和封装：工厂注册方法受保护，仅限包内使用，防止外部误操作。
-
-统一调用接口：无论何种计算类型，外部只需通过统一接口获取并调用，简化调用方逻辑。
-
-便于测试和维护：策略类单一职责，便于单元测试与局部维护。
-
-5. 总结
-本设计通过枚举与策略模式的结合，极大提升了转换组件的灵活性与扩展性，有效支撑了复杂多样的字段映射需求，实现了解耦、可维护、可扩展和安全的设计目标。
-
-
+这个设计提供了一个完整、灵活且易于维护的ETL路由转换解决方案。您可以根据具体需求进行调整和扩展。
