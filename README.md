@@ -540,3 +540,298 @@ public class AggregateConfigService {
 - 添加性能优化（并行处理）
 
 需要我进一步完善某个部分吗？
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 增强的过滤表达式解析器
+ * 支持：=, !=, >, <, >=, <=, IN, NOT IN, AND, OR, IS NULL, IS NOT NULL
+ */
+public class FilterEvaluator {
+    
+    private final Map<String, Object> row;
+    
+    public FilterEvaluator(Map<String, Object> row) {
+        this.row = row;
+    }
+    
+    public boolean evaluate(String expression) {
+        if (expression == null || expression.trim().isEmpty()) {
+            return true;
+        }
+        
+        // 处理 OR（优先级最低）
+        if (expression.contains(" OR ")) {
+            String[] parts = splitByOperator(expression, " OR ");
+            for (String part : parts) {
+                if (evaluate(part.trim())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // 处理 AND
+        if (expression.contains(" AND ")) {
+            String[] parts = splitByOperator(expression, " AND ");
+            for (String part : parts) {
+                if (!evaluate(part.trim())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        
+        // 处理括号
+        if (expression.startsWith("(") && expression.endsWith(")")) {
+            return evaluate(expression.substring(1, expression.length() - 1));
+        }
+        
+        // 处理单个条件
+        return evaluateSingleCondition(expression.trim());
+    }
+    
+    /**
+     * 分割表达式，考虑括号内的内容
+     */
+    private String[] splitByOperator(String expression, String operator) {
+        List<String> parts = new ArrayList<>();
+        int start = 0;
+        int parenthesesLevel = 0;
+        
+        for (int i = 0; i <= expression.length() - operator.length(); i++) {
+            char c = expression.charAt(i);
+            
+            if (c == '(') {
+                parenthesesLevel++;
+            } else if (c == ')') {
+                parenthesesLevel--;
+            }
+            
+            if (parenthesesLevel == 0 && expression.substring(i).startsWith(operator)) {
+                parts.add(expression.substring(start, i));
+                start = i + operator.length();
+                i += operator.length() - 1;
+            }
+        }
+        parts.add(expression.substring(start));
+        
+        return parts.toArray(new String[0]);
+    }
+    
+    private boolean evaluateSingleCondition(String condition) {
+        condition = condition.trim();
+        
+        // 处理 IS NULL
+        if (condition.toUpperCase().matches(".*\\s+IS\\s+NULL$")) {
+            Pattern pattern = Pattern.compile("([\\w.]+)\\s+IS\\s+NULL", Pattern.CASE_INSENSITIVE);
+            Matcher matcher = pattern.matcher(condition);
+            if (matcher.matches()) {
+                String fieldName = matcher.group(1).trim();
+                return row.get(fieldName) == null;
+            }
+        }
+        
+        // 处理 IS NOT NULL
+        if (condition.toUpperCase().matches(".*\\s+IS\\s+NOT\\s+NULL$")) {
+            Pattern pattern = Pattern.compile("([\\w.]+)\\s+IS\\s+NOT\\s+NULL", Pattern.CASE_INSENSITIVE);
+            Matcher matcher = pattern.matcher(condition);
+            if (matcher.matches()) {
+                String fieldName = matcher.group(1).trim();
+                return row.get(fieldName) != null;
+            }
+        }
+        
+        // 处理 NOT IN
+        if (condition.toUpperCase().contains(" NOT IN ")) {
+            return evaluateNotInCondition(condition);
+        }
+        
+        // 处理 IN
+        if (condition.toUpperCase().contains(" IN ")) {
+            return evaluateInCondition(condition);
+        }
+        
+        // 处理其他比较操作符
+        return evaluateComparisonCondition(condition);
+    }
+    
+    /**
+     * 处理 IN 条件
+     * 格式：fieldName IN (value1, value2, value3)
+     */
+    private boolean evaluateInCondition(String condition) {
+        Pattern pattern = Pattern.compile("([\\w.]+)\\s+IN\\s+\\((.+?)\\)", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(condition);
+        
+        if (!matcher.matches()) {
+            System.err.println("IN 条件格式错误: " + condition);
+            return false;
+        }
+        
+        String fieldName = matcher.group(1).trim();
+        String valuesStr = matcher.group(2).trim();
+        
+        Object fieldValue = row.get(fieldName);
+        if (fieldValue == null) {
+            return false;
+        }
+        
+        // 解析 IN 列表中的值
+        List<String> inValues = parseInValues(valuesStr);
+        
+        // 检查字段值是否在列表中
+        String fieldValueStr = fieldValue.toString();
+        for (String inValue : inValues) {
+            if (fieldValueStr.equals(inValue)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * 处理 NOT IN 条件
+     */
+    private boolean evaluateNotInCondition(String condition) {
+        Pattern pattern = Pattern.compile("([\\w.]+)\\s+NOT\\s+IN\\s+\\((.+?)\\)", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(condition);
+        
+        if (!matcher.matches()) {
+            System.err.println("NOT IN 条件格式错误: " + condition);
+            return false;
+        }
+        
+        String fieldName = matcher.group(1).trim();
+        String valuesStr = matcher.group(2).trim();
+        
+        Object fieldValue = row.get(fieldName);
+        if (fieldValue == null) {
+            return true; // NULL 不在任何列表中
+        }
+        
+        // 解析 NOT IN 列表中的值
+        List<String> inValues = parseInValues(valuesStr);
+        
+        // 检查字段值是否不在列表中
+        String fieldValueStr = fieldValue.toString();
+        for (String inValue : inValues) {
+            if (fieldValueStr.equals(inValue)) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    /**
+     * 解析 IN 子句中的值列表
+     * 支持：'value1', 'value2', 123, 456
+     */
+    private List<String> parseInValues(String valuesStr) {
+        List<String> values = new ArrayList<>();
+        
+        // 分割逗号，但要考虑引号内的逗号
+        StringBuilder currentValue = new StringBuilder();
+        boolean inQuote = false;
+        char quoteChar = 0;
+        
+        for (int i = 0; i < valuesStr.length(); i++) {
+            char c = valuesStr.charAt(i);
+            
+            if ((c == '\'' || c == '"') && !inQuote) {
+                inQuote = true;
+                quoteChar = c;
+            } else if (c == quoteChar && inQuote) {
+                inQuote = false;
+                quoteChar = 0;
+            } else if (c == ',' && !inQuote) {
+                String value = currentValue.toString().trim();
+                if (!value.isEmpty()) {
+                    values.add(cleanValue(value));
+                }
+                currentValue = new StringBuilder();
+            } else {
+                currentValue.append(c);
+            }
+        }
+        
+        // 添加最后一个值
+        String lastValue = currentValue.toString().trim();
+        if (!lastValue.isEmpty()) {
+            values.add(cleanValue(lastValue));
+        }
+        
+        return values;
+    }
+    
+    /**
+     * 清理值（去除引号和空格）
+     */
+    private String cleanValue(String value) {
+        value = value.trim();
+        // 去除首尾的单引号或双引号
+        if ((value.startsWith("'") && value.endsWith("'")) ||
+            (value.startsWith("\"") && value.endsWith("\""))) {
+            return value.substring(1, value.length() - 1);
+        }
+        return value;
+    }
+    
+    /**
+     * 处理比较条件：>=, <=, !=, =, >, <
+     */
+    private boolean evaluateComparisonCondition(String condition) {
+        Pattern pattern = Pattern.compile("([\\w.]+)\\s*(>=|<=|!=|=|>|<)\\s*(.+)");
+        Matcher matcher = pattern.matcher(condition);
+        
+        if (!matcher.matches()) {
+            System.err.println("条件格式错误: " + condition);
+            return true;
+        }
+        
+        String fieldName = matcher.group(1).trim();
+        String operator = matcher.group(2).trim();
+        String valueStr = matcher.group(3).trim();
+        
+        Object fieldValue = row.get(fieldName);
+        if (fieldValue == null) {
+            return false;
+        }
+        
+        return compareValues(fieldValue, operator, valueStr);
+    }
+    
+    private boolean compareValues(Object fieldValue, String operator, String valueStr) {
+        valueStr = cleanValue(valueStr);
+        
+        switch (operator) {
+            case "=":
+                return fieldValue.toString().equals(valueStr);
+            case "!=":
+                return !fieldValue.toString().equals(valueStr);
+            case ">":
+                return compareNumeric(fieldValue, valueStr) > 0;
+            case "<":
+                return compareNumeric(fieldValue, valueStr) < 0;
+            case ">=":
+                return compareNumeric(fieldValue, valueStr) >= 0;
+            case "<=":
+                return compareNumeric(fieldValue, valueStr) <= 0;
+            default:
+                return false;
+        }
+    }
+    
+    private int compareNumeric(Object fieldValue, String valueStr) {
+        try {
+            double fieldNum = Double.parseDouble(fieldValue.toString());
+            double compareNum = Double.parseDouble(valueStr);
+            return Double.compare(fieldNum, compareNum);
+        } catch (NumberFormatException e) {
+            return fieldValue.toString().compareTo(valueStr);
+        }
+    }
+}
