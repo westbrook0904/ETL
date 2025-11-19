@@ -1,647 +1,542 @@
-我来帮你设计一个完整的ETL组件异常处理体系。这个设计将支持你提到的所有场景。
+我来帮你设计一个完整的ETL聚合组件。这个设计包括配置表结构、配置实体、聚合引擎和使用示例。
 
-## 设计思路
+## 1. 数据库配置表设计
 
-我会采用**异常分层 + 异常处理策略**的设计模式：
+```sql
+-- 聚合配置主表
+CREATE TABLE etl_aggregate_config (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    config_name VARCHAR(100) NOT NULL COMMENT '配置名称',
+    description VARCHAR(500) COMMENT '描述',
+    filter_expression VARCHAR(2000) COMMENT '过滤表达式，如: amount>100 AND status=active',
+    enabled TINYINT(1) DEFAULT 1 COMMENT '是否启用',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
 
-### 1. 异常类层次结构
+-- 分组字段配置表
+CREATE TABLE etl_aggregate_group_field (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    config_id BIGINT NOT NULL COMMENT '配置ID',
+    field_name VARCHAR(100) NOT NULL COMMENT '分组字段名',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    FOREIGN KEY (config_id) REFERENCES etl_aggregate_config(id)
+);
+
+-- 聚合字段配置表
+CREATE TABLE etl_aggregate_field (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    config_id BIGINT NOT NULL COMMENT '配置ID',
+    field_name VARCHAR(100) NOT NULL COMMENT '聚合字段名',
+    aggregate_type VARCHAR(20) NOT NULL COMMENT '聚合类型: SUM/AVG/COUNT/MAX/MIN',
+    output_field_name VARCHAR(100) COMMENT '输出字段名，为空则使用原字段名',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    FOREIGN KEY (config_id) REFERENCES etl_aggregate_config(id)
+);
+```
+
+## 2. 配置实体类
 
 ```java
-// ============ 基础异常类 ============
+import lombok.Data;
+import java.util.List;
 
 /**
- * ETL异常基类
- * 所有ETL相关异常的父类
+ * 聚合配置
  */
-public abstract class ETLException extends Exception {
-    private final ExceptionHandlingStrategy strategy;
-    private final String componentName;
-    private final Object context;
-    
-    public ETLException(String message, ExceptionHandlingStrategy strategy, 
-                        String componentName, Object context) {
-        super(message);
-        this.strategy = strategy;
-        this.componentName = componentName;
-        this.context = context;
-    }
-    
-    public ETLException(String message, Throwable cause, 
-                        ExceptionHandlingStrategy strategy, 
-                        String componentName, Object context) {
-        super(message, cause);
-        this.strategy = strategy;
-        this.componentName = componentName;
-        this.context = context;
-    }
-    
-    public ExceptionHandlingStrategy getStrategy() {
-        return strategy;
-    }
-    
-    public String getComponentName() {
-        return componentName;
-    }
-    
-    public Object getContext() {
-        return context;
-    }
+@Data
+public class AggregateConfig {
+    private Long id;
+    private String configName;
+    private String description;
+    private String filterExpression;
+    private Boolean enabled;
+    private List<String> groupByFields;
+    private List<AggregateField> aggregateFields;
 }
 
-// ============ 异常处理策略枚举 ============
-
 /**
- * 异常处理策略
+ * 聚合字段配置
  */
-public enum ExceptionHandlingStrategy {
-    /**
-     * 场景1: 内部处理，不向外传播
-     */
-    HANDLE_INTERNALLY,
+@Data
+public class AggregateField {
+    private String fieldName;
+    private AggregateType aggregateType;
+    private String outputFieldName;
     
-    /**
-     * 场景2: 继续执行当前批次的后续组件
-     */
-    CONTINUE_CURRENT_BATCH,
-    
-    /**
-     * 场景3: 跳过当前批次，执行下一批次
-     */
-    SKIP_TO_NEXT_BATCH,
-    
-    /**
-     * 场景4: 终止整个管道
-     */
-    TERMINATE_PIPELINE,
-    
-    /**
-     * 场景5: 进行重试
-     */
-    RETRY
-}
-
-// ============ 具体异常类 ============
-
-/**
- * 场景2: 可恢复异常 - 当前批次后续组件继续执行
- * 例如：某个字段验证失败，记录错误但继续处理其他数据
- */
-public class RecoverableETLException extends ETLException {
-    private final int failedRecordCount;
-    
-    public RecoverableETLException(String message, String componentName, 
-                                   Object context, int failedRecordCount) {
-        super(message, ExceptionHandlingStrategy.CONTINUE_CURRENT_BATCH, 
-              componentName, context);
-        this.failedRecordCount = failedRecordCount;
-    }
-    
-    public int getFailedRecordCount() {
-        return failedRecordCount;
+    public String getOutputFieldName() {
+        return outputFieldName != null ? outputFieldName : fieldName;
     }
 }
 
 /**
- * 场景3: 批次级异常 - 跳过当前批次，处理下一批次
- * 例如：数据源临时不可用，跳过这批数据
+ * 聚合类型枚举
  */
-public class BatchLevelETLException extends ETLException {
-    private final String batchId;
-    
-    public BatchLevelETLException(String message, String componentName, 
-                                  String batchId, Object context) {
-        super(message, ExceptionHandlingStrategy.SKIP_TO_NEXT_BATCH, 
-              componentName, context);
-        this.batchId = batchId;
-    }
-    
-    public BatchLevelETLException(String message, Throwable cause, 
-                                  String componentName, String batchId, 
-                                  Object context) {
-        super(message, cause, ExceptionHandlingStrategy.SKIP_TO_NEXT_BATCH, 
-              componentName, context);
-        this.batchId = batchId;
-    }
-    
-    public String getBatchId() {
-        return batchId;
-    }
-}
-
-/**
- * 场景4: 致命异常 - 终止整个管道
- * 例如：配置错误、资源耗尽、关键组件失败
- */
-public class FatalETLException extends ETLException {
-    private final FatalErrorType errorType;
-    
-    public FatalETLException(String message, String componentName, 
-                            FatalErrorType errorType, Object context) {
-        super(message, ExceptionHandlingStrategy.TERMINATE_PIPELINE, 
-              componentName, context);
-        this.errorType = errorType;
-    }
-    
-    public FatalETLException(String message, Throwable cause, 
-                            String componentName, FatalErrorType errorType, 
-                            Object context) {
-        super(message, cause, ExceptionHandlingStrategy.TERMINATE_PIPELINE, 
-              componentName, context);
-        this.errorType = errorType;
-    }
-    
-    public FatalErrorType getErrorType() {
-        return errorType;
-    }
-    
-    public enum FatalErrorType {
-        CONFIGURATION_ERROR,
-        RESOURCE_EXHAUSTED,
-        CRITICAL_COMPONENT_FAILURE,
-        SECURITY_VIOLATION,
-        DATA_CORRUPTION
-    }
-}
-
-/**
- * 场景5: 可重试异常 - 支持重试机制
- * 例如：网络超时、临时性数据库连接失败
- */
-public class RetryableETLException extends ETLException {
-    private final int currentRetryCount;
-    private final int maxRetryCount;
-    private final long retryDelayMillis;
-    private final RetryStrategy retryStrategy;
-    
-    public RetryableETLException(String message, String componentName, 
-                                 Object context, int currentRetryCount, 
-                                 int maxRetryCount, long retryDelayMillis,
-                                 RetryStrategy retryStrategy) {
-        super(message, ExceptionHandlingStrategy.RETRY, componentName, context);
-        this.currentRetryCount = currentRetryCount;
-        this.maxRetryCount = maxRetryCount;
-        this.retryDelayMillis = retryDelayMillis;
-        this.retryStrategy = retryStrategy;
-    }
-    
-    public RetryableETLException(String message, Throwable cause, 
-                                 String componentName, Object context, 
-                                 int currentRetryCount, int maxRetryCount, 
-                                 long retryDelayMillis,
-                                 RetryStrategy retryStrategy) {
-        super(message, cause, ExceptionHandlingStrategy.RETRY, 
-              componentName, context);
-        this.currentRetryCount = currentRetryCount;
-        this.maxRetryCount = maxRetryCount;
-        this.retryDelayMillis = retryDelayMillis;
-        this.retryStrategy = retryStrategy;
-    }
-    
-    public int getCurrentRetryCount() {
-        return currentRetryCount;
-    }
-    
-    public int getMaxRetryCount() {
-        return maxRetryCount;
-    }
-    
-    public long getRetryDelayMillis() {
-        return retryDelayMillis;
-    }
-    
-    public RetryStrategy getRetryStrategy() {
-        return retryStrategy;
-    }
-    
-    public boolean canRetry() {
-        return currentRetryCount < maxRetryCount;
-    }
-    
-    /**
-     * 创建下一次重试的异常实例
-     */
-    public RetryableETLException nextRetry() {
-        return new RetryableETLException(
-            getMessage(), 
-            getCause(),
-            getComponentName(), 
-            getContext(),
-            currentRetryCount + 1,
-            maxRetryCount,
-            retryStrategy.calculateNextDelay(currentRetryCount, retryDelayMillis),
-            retryStrategy
-        );
-    }
-    
-    public enum RetryStrategy {
-        /**
-         * 固定延迟
-         */
-        FIXED {
-            @Override
-            public long calculateNextDelay(int retryCount, long baseDelay) {
-                return baseDelay;
-            }
-        },
-        
-        /**
-         * 指数退避
-         */
-        EXPONENTIAL_BACKOFF {
-            @Override
-            public long calculateNextDelay(int retryCount, long baseDelay) {
-                return baseDelay * (long) Math.pow(2, retryCount);
-            }
-        },
-        
-        /**
-         * 线性增长
-         */
-        LINEAR {
-            @Override
-            public long calculateNextDelay(int retryCount, long baseDelay) {
-                return baseDelay * (retryCount + 1);
-            }
-        };
-        
-        public abstract long calculateNextDelay(int retryCount, long baseDelay);
-    }
-}
-
-// ============ 异常处理器接口 ============
-
-/**
- * 异常处理器接口
- */
-public interface ExceptionHandler {
-    /**
-     * 处理异常
-     * @param exception ETL异常
-     * @return 处理结果
-     */
-    ExceptionHandlingResult handle(ETLException exception);
-}
-
-/**
- * 异常处理结果
- */
-public class ExceptionHandlingResult {
-    private final boolean shouldContinue;
-    private final boolean shouldRetry;
-    private final boolean shouldTerminate;
-    private final String message;
-    
-    private ExceptionHandlingResult(boolean shouldContinue, boolean shouldRetry, 
-                                   boolean shouldTerminate, String message) {
-        this.shouldContinue = shouldContinue;
-        this.shouldRetry = shouldRetry;
-        this.shouldTerminate = shouldTerminate;
-        this.message = message;
-    }
-    
-    public static ExceptionHandlingResult continueExecution(String message) {
-        return new ExceptionHandlingResult(true, false, false, message);
-    }
-    
-    public static ExceptionHandlingResult retry(String message) {
-        return new ExceptionHandlingResult(false, true, false, message);
-    }
-    
-    public static ExceptionHandlingResult terminate(String message) {
-        return new ExceptionHandlingResult(false, false, true, message);
-    }
-    
-    public boolean shouldContinue() {
-        return shouldContinue;
-    }
-    
-    public boolean shouldRetry() {
-        return shouldRetry;
-    }
-    
-    public boolean shouldTerminate() {
-        return shouldTerminate;
-    }
-    
-    public String getMessage() {
-        return message;
-    }
-}
-
-// ============ 默认异常处理器实现 ============
-
-/**
- * 默认异常处理器
- */
-public class DefaultExceptionHandler implements ExceptionHandler {
-    private static final Logger logger = LoggerFactory.getLogger(DefaultExceptionHandler.class);
-    
-    @Override
-    public ExceptionHandlingResult handle(ETLException exception) {
-        ExceptionHandlingStrategy strategy = exception.getStrategy();
-        
-        // 记录异常日志
-        logException(exception);
-        
-        switch (strategy) {
-            case CONTINUE_CURRENT_BATCH:
-                return handleRecoverable(exception);
-                
-            case SKIP_TO_NEXT_BATCH:
-                return handleBatchLevel(exception);
-                
-            case TERMINATE_PIPELINE:
-                return handleFatal(exception);
-                
-            case RETRY:
-                return handleRetryable(exception);
-                
-            case HANDLE_INTERNALLY:
-            default:
-                return ExceptionHandlingResult.continueExecution(
-                    "Exception handled internally");
-        }
-    }
-    
-    private ExceptionHandlingResult handleRecoverable(ETLException exception) {
-        logger.warn("Recoverable exception in component {}: {}", 
-                   exception.getComponentName(), exception.getMessage());
-        return ExceptionHandlingResult.continueExecution(
-            "Continuing with next component");
-    }
-    
-    private ExceptionHandlingResult handleBatchLevel(ETLException exception) {
-        logger.error("Batch level exception in component {}: {}", 
-                    exception.getComponentName(), exception.getMessage());
-        if (exception instanceof BatchLevelETLException) {
-            BatchLevelETLException batchException = (BatchLevelETLException) exception;
-            logger.error("Skipping batch: {}", batchException.getBatchId());
-        }
-        return ExceptionHandlingResult.continueExecution(
-            "Skipping to next batch");
-    }
-    
-    private ExceptionHandlingResult handleFatal(ETLException exception) {
-        logger.error("Fatal exception in component {}: {}", 
-                    exception.getComponentName(), exception.getMessage(), exception);
-        return ExceptionHandlingResult.terminate(
-            "Pipeline terminated due to fatal error");
-    }
-    
-    private ExceptionHandlingResult handleRetryable(ETLException exception) {
-        if (exception instanceof RetryableETLException) {
-            RetryableETLException retryException = (RetryableETLException) exception;
-            if (retryException.canRetry()) {
-                logger.warn("Retryable exception in component {}: {} (retry {}/{})", 
-                           exception.getComponentName(), 
-                           exception.getMessage(),
-                           retryException.getCurrentRetryCount(),
-                           retryException.getMaxRetryCount());
-                return ExceptionHandlingResult.retry(
-                    "Retrying component execution");
-            } else {
-                logger.error("Max retries exceeded for component {}", 
-                           exception.getComponentName());
-                return ExceptionHandlingResult.terminate(
-                    "Max retries exceeded, terminating pipeline");
-            }
-        }
-        return ExceptionHandlingResult.terminate("Invalid retry configuration");
-    }
-    
-    private void logException(ETLException exception) {
-        logger.info("Exception context - Component: {}, Strategy: {}, Context: {}", 
-                   exception.getComponentName(),
-                   exception.getStrategy(),
-                   exception.getContext());
-    }
+public enum AggregateType {
+    SUM,    // 求和
+    AVG,    // 平均值
+    COUNT,  // 计数
+    MAX,    // 最大值
+    MIN     // 最小值
 }
 ```
 
-### 2. 组件接口设计
+## 3. 核心聚合引擎
 
 ```java
-/**
- * ETL组件接口
- */
-public interface ETLComponent<I, O> {
-    /**
-     * 执行组件逻辑
-     * @param input 输入数据
-     * @return 输出数据
-     * @throws ETLException 组件执行异常
-     */
-    O execute(I input) throws ETLException;
-    
-    /**
-     * 获取组件名称
-     */
-    String getComponentName();
-    
-    /**
-     * 获取异常处理策略配置
-     */
-    default ExceptionHandlingConfig getExceptionConfig() {
-        return ExceptionHandlingConfig.defaultConfig();
-    }
-}
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
- * 异常处理配置
+ * ETL聚合组件
  */
-public class ExceptionHandlingConfig {
-    private final int maxRetries;
-    private final long retryDelayMillis;
-    private final RetryableETLException.RetryStrategy retryStrategy;
-    private final boolean failFastOnFatal;
+public class AggregateEngine {
     
-    public ExceptionHandlingConfig(int maxRetries, long retryDelayMillis, 
-                                   RetryableETLException.RetryStrategy retryStrategy,
-                                   boolean failFastOnFatal) {
-        this.maxRetries = maxRetries;
-        this.retryDelayMillis = retryDelayMillis;
-        this.retryStrategy = retryStrategy;
-        this.failFastOnFatal = failFastOnFatal;
+    private final AggregateConfig config;
+    
+    public AggregateEngine(AggregateConfig config) {
+        this.config = config;
     }
     
-    public static ExceptionHandlingConfig defaultConfig() {
-        return new ExceptionHandlingConfig(3, 1000L, 
-            RetryableETLException.RetryStrategy.EXPONENTIAL_BACKOFF, true);
-    }
-    
-    // Getters
-    public int getMaxRetries() { return maxRetries; }
-    public long getRetryDelayMillis() { return retryDelayMillis; }
-    public RetryableETLException.RetryStrategy getRetryStrategy() { return retryStrategy; }
-    public boolean isFailFastOnFatal() { return failFastOnFatal; }
-}
-```
-
-### 3. 使用示例
-
-```java
-/**
- * 示例：数据验证组件
- */
-public class DataValidationComponent implements ETLComponent<List<Record>, List<Record>> {
-    
-    @Override
-    public List<Record> execute(List<Record> input) throws ETLException {
-        List<Record> validRecords = new ArrayList<>();
-        int failedCount = 0;
+    /**
+     * 执行聚合
+     * @param inputData 输入数据
+     * @return 聚合后的数据
+     */
+    public List<Map<String, Object>> aggregate(List<Map<String, Object>> inputData) {
+        // 1. 过滤数据
+        List<Map<String, Object>> filteredData = filterData(inputData);
         
-        for (Record record : input) {
-            try {
-                validate(record);
-                validRecords.add(record);
-            } catch (ValidationException e) {
-                // 场景1: 内部处理，记录日志但继续
-                logger.warn("Validation failed for record: {}", record.getId());
-                failedCount++;
-            }
+        // 2. 按分组字段分组
+        Map<String, List<Map<String, Object>>> groupedData = groupData(filteredData);
+        
+        // 3. 对每个分组执行聚合
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map.Entry<String, List<Map<String, Object>>> entry : groupedData.entrySet()) {
+            Map<String, Object> aggregatedRow = aggregateGroup(entry.getValue());
+            result.add(aggregatedRow);
         }
         
-        // 场景2: 如果失败太多，抛出可恢复异常
-        if (failedCount > input.size() * 0.5) {
-            throw new RecoverableETLException(
-                "Too many validation failures", 
-                getComponentName(),
-                input,
-                failedCount
-            );
+        return result;
+    }
+    
+    /**
+     * 过滤数据
+     */
+    private List<Map<String, Object>> filterData(List<Map<String, Object>> inputData) {
+        if (config.getFilterExpression() == null || config.getFilterExpression().trim().isEmpty()) {
+            return inputData;
         }
         
-        return validRecords;
+        return inputData.stream()
+                .filter(row -> evaluateFilter(row, config.getFilterExpression()))
+                .collect(Collectors.toList());
     }
     
-    @Override
-    public String getComponentName() {
-        return "DataValidationComponent";
-    }
-}
-
-/**
- * 示例：数据库写入组件
- */
-public class DatabaseWriteComponent implements ETLComponent<List<Record>, Integer> {
-    private final DataSource dataSource;
-    
-    @Override
-    public Integer execute(List<Record> input) throws ETLException {
+    /**
+     * 评估过滤表达式
+     */
+    private boolean evaluateFilter(Map<String, Object> row, String filterExpression) {
         try {
-            return writeToDatabase(input);
-        } catch (SQLException e) {
-            // 场景5: 网络或临时性错误，可重试
-            if (isTransientError(e)) {
-                throw new RetryableETLException(
-                    "Database write failed: " + e.getMessage(),
-                    e,
-                    getComponentName(),
-                    input,
-                    0, // currentRetryCount
-                    3, // maxRetryCount
-                    1000L, // retryDelayMillis
-                    RetryableETLException.RetryStrategy.EXPONENTIAL_BACKOFF
-                );
-            }
-            
-            // 场景4: 严重错误，终止管道
-            throw new FatalETLException(
-                "Critical database error: " + e.getMessage(),
-                e,
-                getComponentName(),
-                FatalETLException.FatalErrorType.CRITICAL_COMPONENT_FAILURE,
-                input
-            );
+            // 使用简单的表达式解析器
+            FilterEvaluator evaluator = new FilterEvaluator(row);
+            return evaluator.evaluate(filterExpression);
+        } catch (Exception e) {
+            // 过滤表达式错误时，默认不过滤
+            System.err.println("过滤表达式解析错误: " + e.getMessage());
+            return true;
         }
     }
     
-    private boolean isTransientError(SQLException e) {
-        // 判断是否为临时性错误（如超时、连接中断等）
-        return e.getSQLState().startsWith("08") || 
-               e.getMessage().contains("timeout");
+    /**
+     * 分组数据
+     */
+    private Map<String, List<Map<String, Object>>> groupData(List<Map<String, Object>> data) {
+        return data.stream()
+                .collect(Collectors.groupingBy(this::buildGroupKey));
     }
     
-    @Override
-    public String getComponentName() {
-        return "DatabaseWriteComponent";
-    }
-}
-
-/**
- * 示例：ETL管道执行器
- */
-public class ETLPipelineExecutor {
-    private final List<ETLComponent> components;
-    private final ExceptionHandler exceptionHandler;
-    
-    public ETLPipelineExecutor(List<ETLComponent> components, 
-                              ExceptionHandler exceptionHandler) {
-        this.components = components;
-        this.exceptionHandler = exceptionHandler;
-    }
-    
-    public void executeBatch(Object initialData) {
-        Object data = initialData;
+    /**
+     * 构建分组键
+     */
+    private String buildGroupKey(Map<String, Object> row) {
+        List<String> groupByFields = config.getGroupByFields();
+        if (groupByFields == null || groupByFields.isEmpty()) {
+            return "DEFAULT_GROUP";
+        }
         
-        for (ETLComponent component : components) {
-            try {
-                data = executeWithRetry(component, data);
-            } catch (ETLException e) {
-                ExceptionHandlingResult result = exceptionHandler.handle(e);
-                
-                if (result.shouldTerminate()) {
-                    logger.error("Pipeline terminated: {}", result.getMessage());
-                    throw new RuntimeException("Pipeline execution failed", e);
-                } else if (result.shouldRetry()) {
-                    // 重试逻辑已在executeWithRetry中处理
-                    continue;
-                } else if (result.shouldContinue()) {
-                    logger.info("Continuing pipeline execution: {}", result.getMessage());
-                    // 根据策略决定是继续当前批次还是跳到下一批次
-                    if (e.getStrategy() == ExceptionHandlingStrategy.SKIP_TO_NEXT_BATCH) {
-                        break; // 跳出当前批次
-                    }
-                    continue; // 继续下一个组件
-                }
-            }
+        StringBuilder keyBuilder = new StringBuilder();
+        for (String field : groupByFields) {
+            Object value = row.get(field);
+            keyBuilder.append(field).append("=")
+                     .append(value == null ? "null" : value.toString())
+                     .append("|");
+        }
+        return keyBuilder.toString();
+    }
+    
+    /**
+     * 对单个分组执行聚合
+     */
+    private Map<String, Object> aggregateGroup(List<Map<String, Object>> groupData) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        
+        if (groupData.isEmpty()) {
+            return result;
+        }
+        
+        // 1. 添加分组字段
+        Map<String, Object> firstRow = groupData.get(0);
+        for (String groupField : config.getGroupByFields()) {
+            result.put(groupField, firstRow.get(groupField));
+        }
+        
+        // 2. 执行聚合计算
+        for (AggregateField aggField : config.getAggregateFields()) {
+            Object aggregatedValue = calculateAggregate(groupData, aggField);
+            result.put(aggField.getOutputFieldName(), aggregatedValue);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * 计算聚合值
+     */
+    private Object calculateAggregate(List<Map<String, Object>> groupData, AggregateField aggField) {
+        String fieldName = aggField.getFieldName();
+        AggregateType type = aggField.getAggregateType();
+        
+        switch (type) {
+            case SUM:
+                return calculateSum(groupData, fieldName);
+            case AVG:
+                return calculateAvg(groupData, fieldName);
+            case COUNT:
+                return groupData.size();
+            case MAX:
+                return calculateMax(groupData, fieldName);
+            case MIN:
+                return calculateMin(groupData, fieldName);
+            default:
+                throw new IllegalArgumentException("不支持的聚合类型: " + type);
         }
     }
     
-    private Object executeWithRetry(ETLComponent component, Object data) 
-            throws ETLException {
-        RetryableETLException lastException = null;
+    private BigDecimal calculateSum(List<Map<String, Object>> data, String fieldName) {
+        return data.stream()
+                .map(row -> row.get(fieldName))
+                .filter(Objects::nonNull)
+                .map(this::toBigDecimal)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+    
+    private BigDecimal calculateAvg(List<Map<String, Object>> data, String fieldName) {
+        List<BigDecimal> values = data.stream()
+                .map(row -> row.get(fieldName))
+                .filter(Objects::nonNull)
+                .map(this::toBigDecimal)
+                .collect(Collectors.toList());
         
-        while (true) {
-            try {
-                return component.execute(data);
-            } catch (RetryableETLException e) {
-                lastException = e;
-                if (e.canRetry()) {
-                    try {
-                        Thread.sleep(e.getRetryDelayMillis());
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw e;
-                    }
-                    lastException = e.nextRetry();
-                } else {
-                    throw e;
-                }
-            }
+        if (values.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        
+        BigDecimal sum = values.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+        return sum.divide(BigDecimal.valueOf(values.size()), 2, RoundingMode.HALF_UP);
+    }
+    
+    private Comparable calculateMax(List<Map<String, Object>> data, String fieldName) {
+        return data.stream()
+                .map(row -> row.get(fieldName))
+                .filter(Objects::nonNull)
+                .map(obj -> (Comparable) obj)
+                .max(Comparator.naturalOrder())
+                .orElse(null);
+    }
+    
+    private Comparable calculateMin(List<Map<String, Object>> data, String fieldName) {
+        return data.stream()
+                .map(row -> row.get(fieldName))
+                .filter(Objects::nonNull)
+                .map(obj -> (Comparable) obj)
+                .min(Comparator.naturalOrder())
+                .orElse(null);
+    }
+    
+    private BigDecimal toBigDecimal(Object value) {
+        if (value instanceof BigDecimal) {
+            return (BigDecimal) value;
+        } else if (value instanceof Number) {
+            return BigDecimal.valueOf(((Number) value).doubleValue());
+        } else {
+            return new BigDecimal(value.toString());
         }
     }
 }
 ```
 
-## 设计要点总结
+## 4. 过滤表达式解析器
 
-1. **异常分层**：基类 `ETLException` 包含策略信息，各子类针对不同场景
-2. **策略模式**：通过 `ExceptionHandlingStrategy` 枚举明确异常处理意图
-3. **上下文信息**：每个异常都携带组件名称和上下文数据，便于问题定位
-4. **重试机制**：`RetryableETLException` 内置重试逻辑和多种退避策略
-5. **灵活配置**：通过 `ExceptionHandlingConfig` 支持组件级别的配置
-6. **职责分离**：组件负责抛异常，`ExceptionHandler` 负责统一处理
-7. **可扩展性**：易于添加新的异常类型和处理策略
+```java
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-这个设计可以优雅地处理你提到的所有5个场景，并且具有良好的可维护性和扩展性。
+/**
+ * 简单的过滤表达式解析器
+ * 支持：=, !=, >, <, >=, <=, AND, OR
+ */
+public class FilterEvaluator {
+    
+    private final Map<String, Object> row;
+    
+    public FilterEvaluator(Map<String, Object> row) {
+        this.row = row;
+    }
+    
+    public boolean evaluate(String expression) {
+        // 处理 AND 和 OR
+        if (expression.contains(" OR ")) {
+            String[] parts = expression.split(" OR ");
+            for (String part : parts) {
+                if (evaluate(part.trim())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        if (expression.contains(" AND ")) {
+            String[] parts = expression.split(" AND ");
+            for (String part : parts) {
+                if (!evaluate(part.trim())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        
+        // 处理单个条件
+        return evaluateSingleCondition(expression.trim());
+    }
+    
+    private boolean evaluateSingleCondition(String condition) {
+        // 支持的操作符：>=, <=, !=, =, >, <
+        Pattern pattern = Pattern.compile("([\\w.]+)\\s*(>=|<=|!=|=|>|<)\\s*(.+)");
+        Matcher matcher = pattern.matcher(condition);
+        
+        if (!matcher.matches()) {
+            return true; // 无法解析的条件默认为真
+        }
+        
+        String fieldName = matcher.group(1).trim();
+        String operator = matcher.group(2).trim();
+        String valueStr = matcher.group(3).trim();
+        
+        Object fieldValue = row.get(fieldName);
+        if (fieldValue == null) {
+            return false;
+        }
+        
+        return compareValues(fieldValue, operator, valueStr);
+    }
+    
+    private boolean compareValues(Object fieldValue, String operator, String valueStr) {
+        // 去除引号
+        valueStr = valueStr.replaceAll("^['\"]|['\"]$", "");
+        
+        switch (operator) {
+            case "=":
+                return fieldValue.toString().equals(valueStr);
+            case "!=":
+                return !fieldValue.toString().equals(valueStr);
+            case ">":
+                return compareNumeric(fieldValue, valueStr) > 0;
+            case "<":
+                return compareNumeric(fieldValue, valueStr) < 0;
+            case ">=":
+                return compareNumeric(fieldValue, valueStr) >= 0;
+            case "<=":
+                return compareNumeric(fieldValue, valueStr) <= 0;
+            default:
+                return false;
+        }
+    }
+    
+    private int compareNumeric(Object fieldValue, String valueStr) {
+        try {
+            double fieldNum = Double.parseDouble(fieldValue.toString());
+            double compareNum = Double.parseDouble(valueStr);
+            return Double.compare(fieldNum, compareNum);
+        } catch (NumberFormatException e) {
+            return fieldValue.toString().compareTo(valueStr);
+        }
+    }
+}
+```
+
+## 5. 使用示例
+
+```java
+import java.util.*;
+
+public class AggregateEngineDemo {
+    
+    public static void main(String[] args) {
+        // 1. 准备测试数据
+        List<Map<String, Object>> inputData = prepareTestData();
+        
+        // 2. 配置聚合规则
+        AggregateConfig config = new AggregateConfig();
+        config.setGroupByFields(Arrays.asList("category", "region"));
+        config.setFilterExpression("amount > 100");
+        
+        // 配置聚合字段
+        List<AggregateField> aggFields = new ArrayList<>();
+        
+        AggregateField sumField = new AggregateField();
+        sumField.setFieldName("amount");
+        sumField.setAggregateType(AggregateType.SUM);
+        sumField.setOutputFieldName("total_amount");
+        aggFields.add(sumField);
+        
+        AggregateField avgField = new AggregateField();
+        avgField.setFieldName("amount");
+        avgField.setAggregateType(AggregateType.AVG);
+        avgField.setOutputFieldName("avg_amount");
+        aggFields.add(avgField);
+        
+        AggregateField countField = new AggregateField();
+        countField.setFieldName("amount");
+        countField.setAggregateType(AggregateType.COUNT);
+        countField.setOutputFieldName("count");
+        aggFields.add(countField);
+        
+        config.setAggregateFields(aggFields);
+        
+        // 3. 执行聚合
+        AggregateEngine engine = new AggregateEngine(config);
+        List<Map<String, Object>> result = engine.aggregate(inputData);
+        
+        // 4. 输出结果
+        System.out.println("聚合结果：");
+        for (Map<String, Object> row : result) {
+            System.out.println(row);
+        }
+    }
+    
+    private static List<Map<String, Object>> prepareTestData() {
+        List<Map<String, Object>> data = new ArrayList<>();
+        
+        Map<String, Object> row1 = new HashMap<>();
+        row1.put("category", "A");
+        row1.put("region", "North");
+        row1.put("amount", 150);
+        data.add(row1);
+        
+        Map<String, Object> row2 = new HashMap<>();
+        row2.put("category", "A");
+        row2.put("region", "North");
+        row2.put("amount", 200);
+        data.add(row2);
+        
+        Map<String, Object> row3 = new HashMap<>();
+        row3.put("category", "A");
+        row3.put("region", "South");
+        row3.put("amount", 120);
+        data.add(row3);
+        
+        Map<String, Object> row4 = new HashMap<>();
+        row4.put("category", "B");
+        row4.put("region", "North");
+        row4.put("amount", 80); // 会被过滤掉
+        data.add(row4);
+        
+        Map<String, Object> row5 = new HashMap<>();
+        row5.put("category", "B");
+        row5.put("region", "North");
+        row5.put("amount", 300);
+        data.add(row5);
+        
+        return data;
+    }
+}
+```
+
+## 6. 配置管理服务
+
+```java
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.util.List;
+
+/**
+ * 聚合配置服务
+ */
+@Service
+public class AggregateConfigService {
+    
+    @Autowired
+    private AggregateConfigMapper configMapper;
+    
+    @Autowired
+    private AggregateGroupFieldMapper groupFieldMapper;
+    
+    @Autowired
+    private AggregateFieldMapper aggregateFieldMapper;
+    
+    /**
+     * 根据配置ID加载完整配置
+     */
+    public AggregateConfig loadConfig(Long configId) {
+        AggregateConfig config = configMapper.selectById(configId);
+        if (config == null) {
+            throw new RuntimeException("配置不存在: " + configId);
+        }
+        
+        // 加载分组字段
+        List<String> groupFields = groupFieldMapper.selectByConfigId(configId);
+        config.setGroupByFields(groupFields);
+        
+        // 加载聚合字段
+        List<AggregateField> aggFields = aggregateFieldMapper.selectByConfigId(configId);
+        config.setAggregateFields(aggFields);
+        
+        return config;
+    }
+    
+    /**
+     * 执行聚合
+     */
+    public List<Map<String, Object>> executeAggregate(Long configId, List<Map<String, Object>> inputData) {
+        AggregateConfig config = loadConfig(configId);
+        
+        if (!config.getEnabled()) {
+            throw new RuntimeException("配置未启用: " + configId);
+        }
+        
+        AggregateEngine engine = new AggregateEngine(config);
+        return engine.aggregate(inputData);
+    }
+}
+```
+
+## 主要特性
+
+✅ **灵活的分组**：支持多字段分组  
+✅ **多种聚合函数**：SUM、AVG、COUNT、MAX、MIN  
+✅ **数据过滤**：支持复杂的过滤表达式（AND、OR、比较操作符）  
+✅ **可配置化**：所有配置存储在数据库中  
+✅ **自定义输出字段名**：聚合结果可以指定输出字段名  
+✅ **类型安全**：使用BigDecimal进行数值计算，避免精度丢失  
+
+这个设计可以根据你的实际需求进行扩展，比如：
+- 添加更多聚合函数（DISTINCT_COUNT、MEDIAN等）
+- 支持更复杂的过滤表达式（使用MVEL或SpEL）
+- 支持嵌套聚合
+- 添加性能优化（并行处理）
+
+需要我进一步完善某个部分吗？
