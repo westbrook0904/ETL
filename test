@@ -1,0 +1,854 @@
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Nested;
+
+import java.math.BigDecimal;
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * AggregateEngine 完整测试用例
+ * 涵盖各种聚合场景、边界条件和异常情况
+ */
+@DisplayName("AggregateEngine 测试")
+class AggregateEngineTest {
+
+    private AggregateEngine engine;
+    private AggregateConfig config;
+    
+    @Nested
+    @DisplayName("基本聚合功能测试")
+    class BasicAggregationTests {
+        
+        @Test
+        @DisplayName("测试SUM求和聚合")
+        void testSumAggregation() {
+            // 准备配置
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total_amount")
+            ));
+            engine = new AggregateEngine(config);
+            
+            // 准备测试数据
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("category", "A", "amount", 100));
+            inputData.add(createRow("category", "A", "amount", 200));
+            inputData.add(createRow("category", "B", "amount", 150));
+            inputData.add(createRow("category", "B", "amount", 250));
+            
+            // 执行聚合
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            // 验证结果
+            assertEquals(2, result.size());
+            
+            Map<String, Object> groupA = findGroupByCategory(result, "A");
+            Map<String, Object> groupB = findGroupByCategory(result, "B");
+            
+            assertNotNull(groupA);
+            assertNotNull(groupB);
+            assertEquals(new BigDecimal("300"), groupA.get("total_amount"));
+            assertEquals(new BigDecimal("400"), groupB.get("total_amount"));
+        }
+        
+        @Test
+        @DisplayName("测试AVG平均值聚合")
+        void testAvgAggregation() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("department"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("salary", AggregateType.AVG, "avg_salary")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("department", "IT", "salary", 8000));
+            inputData.add(createRow("department", "IT", "salary", 10000));
+            inputData.add(createRow("department", "IT", "salary", 12000));
+            inputData.add(createRow("department", "HR", "salary", 6000));
+            inputData.add(createRow("department", "HR", "salary", 8000));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(2, result.size());
+            
+            Map<String, Object> itGroup = findGroupByCategory(result, "IT", "department");
+            Map<String, Object> hrGroup = findGroupByCategory(result, "HR", "department");
+            
+            // IT部门平均工资: (8000 + 10000 + 12000) / 3 = 10000
+            assertEquals(new BigDecimal("10000.00"), itGroup.get("avg_salary"));
+            // HR部门平均工资: (6000 + 8000) / 2 = 7000
+            assertEquals(new BigDecimal("7000.00"), hrGroup.get("avg_salary"));
+        }
+        
+        @Test
+        @DisplayName("测试COUNT计数聚合")
+        void testCountAggregation() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("status"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("id", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("status", "active", "id", 1));
+            inputData.add(createRow("status", "active", "id", 2));
+            inputData.add(createRow("status", "active", "id", 3));
+            inputData.add(createRow("status", "inactive", "id", 4));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(2, result.size());
+            
+            Map<String, Object> activeGroup = findGroupByCategory(result, "active", "status");
+            Map<String, Object> inactiveGroup = findGroupByCategory(result, "inactive", "status");
+            
+            assertEquals(3, activeGroup.get("count"));
+            assertEquals(1, inactiveGroup.get("count"));
+        }
+        
+        @Test
+        @DisplayName("测试MAX最大值聚合")
+        void testMaxAggregation() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("product"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("price", AggregateType.MAX, "max_price")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("product", "Phone", "price", 3999));
+            inputData.add(createRow("product", "Phone", "price", 4999));
+            inputData.add(createRow("product", "Phone", "price", 2999));
+            inputData.add(createRow("product", "Laptop", "price", 8000));
+            inputData.add(createRow("product", "Laptop", "price", 12000));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(2, result.size());
+            
+            Map<String, Object> phoneGroup = findGroupByCategory(result, "Phone", "product");
+            Map<String, Object> laptopGroup = findGroupByCategory(result, "Laptop", "product");
+            
+            assertEquals(4999, phoneGroup.get("max_price"));
+            assertEquals(12000, laptopGroup.get("max_price"));
+        }
+        
+        @Test
+        @DisplayName("测试MIN最小值聚合")
+        void testMinAggregation() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("region"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("temperature", AggregateType.MIN, "min_temp")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("region", "North", "temperature", -5));
+            inputData.add(createRow("region", "North", "temperature", 0));
+            inputData.add(createRow("region", "North", "temperature", 3));
+            inputData.add(createRow("region", "South", "temperature", 15));
+            inputData.add(createRow("region", "South", "temperature", 20));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(2, result.size());
+            
+            Map<String, Object> northGroup = findGroupByCategory(result, "North", "region");
+            Map<String, Object> southGroup = findGroupByCategory(result, "South", "region");
+            
+            assertEquals(-5, northGroup.get("min_temp"));
+            assertEquals(15, southGroup.get("min_temp"));
+        }
+    }
+    
+    @Nested
+    @DisplayName("多字段聚合测试")
+    class MultipleAggregationTests {
+        
+        @Test
+        @DisplayName("测试同时使用多种聚合函数")
+        void testMultipleAggregations() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("store"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("sales", AggregateType.SUM, "total_sales"),
+                new AggregateField("sales", AggregateType.AVG, "avg_sales"),
+                new AggregateField("sales", AggregateType.COUNT, "count"),
+                new AggregateField("sales", AggregateType.MAX, "max_sales"),
+                new AggregateField("sales", AggregateType.MIN, "min_sales")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("store", "Store1", "sales", 1000));
+            inputData.add(createRow("store", "Store1", "sales", 2000));
+            inputData.add(createRow("store", "Store1", "sales", 3000));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            Map<String, Object> store1 = result.get(0);
+            
+            assertEquals("Store1", store1.get("store"));
+            assertEquals(new BigDecimal("6000"), store1.get("total_sales"));
+            assertEquals(new BigDecimal("2000.00"), store1.get("avg_sales"));
+            assertEquals(3, store1.get("count"));
+            assertEquals(3000, store1.get("max_sales"));
+            assertEquals(1000, store1.get("min_sales"));
+        }
+        
+        @Test
+        @DisplayName("测试多字段分组")
+        void testMultipleGroupByFields() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("city", "category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            Map<String, Object> row1 = new HashMap<>();
+            row1.put("city", "Beijing");
+            row1.put("category", "Food");
+            row1.put("amount", 100);
+            
+            Map<String, Object> row2 = new HashMap<>();
+            row2.put("city", "Beijing");
+            row2.put("category", "Food");
+            row2.put("amount", 200);
+            
+            Map<String, Object> row3 = new HashMap<>();
+            row3.put("city", "Beijing");
+            row3.put("category", "Clothes");
+            row3.put("amount", 300);
+            
+            Map<String, Object> row4 = new HashMap<>();
+            row4.put("city", "Shanghai");
+            row4.put("category", "Food");
+            row4.put("amount", 150);
+            
+            inputData.add(row1);
+            inputData.add(row2);
+            inputData.add(row3);
+            inputData.add(row4);
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(3, result.size());
+            
+            // 验证 Beijing + Food = 300
+            Map<String, Object> beijingFood = findGroup(result, "Beijing", "Food");
+            assertNotNull(beijingFood);
+            assertEquals(new BigDecimal("300"), beijingFood.get("total"));
+            
+            // 验证 Beijing + Clothes = 300
+            Map<String, Object> beijingClothes = findGroup(result, "Beijing", "Clothes");
+            assertNotNull(beijingClothes);
+            assertEquals(new BigDecimal("300"), beijingClothes.get("total"));
+            
+            // 验证 Shanghai + Food = 150
+            Map<String, Object> shanghaiFood = findGroup(result, "Shanghai", "Food");
+            assertNotNull(shanghaiFood);
+            assertEquals(new BigDecimal("150"), shanghaiFood.get("total"));
+        }
+    }
+    
+    @Nested
+    @DisplayName("过滤功能测试")
+    class FilterTests {
+        
+        @Test
+        @DisplayName("测试数值过滤 - 大于")
+        void testNumericFilterGreaterThan() {
+            config = new AggregateConfig();
+            config.setFilterExpression("amount > 100");
+            config.setGroupByFields(Arrays.asList("category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("category", "A", "amount", 50));
+            inputData.add(createRow("category", "A", "amount", 150));
+            inputData.add(createRow("category", "A", "amount", 200));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            // 只有150和200符合条件，总和350
+            assertEquals(new BigDecimal("350"), result.get(0).get("total"));
+        }
+        
+        @Test
+        @DisplayName("测试数值过滤 - 小于等于")
+        void testNumericFilterLessThanOrEqual() {
+            config = new AggregateConfig();
+            config.setFilterExpression("price <= 1000");
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("price", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "price", 500));
+            inputData.add(createRow("type", "A", "price", 1000));
+            inputData.add(createRow("type", "A", "price", 1500));
+            inputData.add(createRow("type", "A", "price", 2000));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            // 只有500和1000符合条件
+            assertEquals(2, result.get(0).get("count"));
+        }
+        
+        @Test
+        @DisplayName("测试字符串过滤 - 等于")
+        void testStringFilterEquals() {
+            config = new AggregateConfig();
+            config.setFilterExpression("status == active");
+            config.setGroupByFields(Arrays.asList("department"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("id", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            Map<String, Object> row1 = new HashMap<>();
+            row1.put("department", "IT");
+            row1.put("status", "active");
+            row1.put("id", 1);
+            
+            Map<String, Object> row2 = new HashMap<>();
+            row2.put("department", "IT");
+            row2.put("status", "inactive");
+            row2.put("id", 2);
+            
+            Map<String, Object> row3 = new HashMap<>();
+            row3.put("department", "IT");
+            row3.put("status", "active");
+            row3.put("id", 3);
+            
+            inputData.add(row1);
+            inputData.add(row2);
+            inputData.add(row3);
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            // 只有2条active记录
+            assertEquals(2, result.get(0).get("count"));
+        }
+        
+        @Test
+        @DisplayName("测试空过滤表达式")
+        void testEmptyFilterExpression() {
+            config = new AggregateConfig();
+            config.setFilterExpression("");
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 1));
+            inputData.add(createRow("type", "A", "value", 2));
+            inputData.add(createRow("type", "A", "value", 3));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            // 所有数据都应该被保留
+            assertEquals(3, result.get(0).get("count"));
+        }
+        
+        @Test
+        @DisplayName("测试null过滤表达式")
+        void testNullFilterExpression() {
+            config = new AggregateConfig();
+            config.setFilterExpression(null);
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 1));
+            inputData.add(createRow("type", "A", "value", 2));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(2, result.get(0).get("count"));
+        }
+    }
+    
+    @Nested
+    @DisplayName("边界条件测试")
+    class BoundaryTests {
+        
+        @Test
+        @DisplayName("测试空输入数据")
+        void testEmptyInputData() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertNotNull(result);
+            assertEquals(0, result.size());
+        }
+        
+        @Test
+        @DisplayName("测试单条数据")
+        void testSingleRecord() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.SUM, "total"),
+                new AggregateField("value", AggregateType.AVG, "average")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 100));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("100"), result.get(0).get("total"));
+            assertEquals(new BigDecimal("100.00"), result.get(0).get("average"));
+        }
+        
+        @Test
+        @DisplayName("测试包含null值的数据")
+        void testNullValues() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total"),
+                new AggregateField("amount", AggregateType.AVG, "average"),
+                new AggregateField("amount", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("category", "A", "amount", 100));
+            inputData.add(createRow("category", "A", "amount", null));
+            inputData.add(createRow("category", "A", "amount", 200));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            // null值应该被过滤掉，只计算100和200
+            assertEquals(new BigDecimal("300"), result.get(0).get("total"));
+            assertEquals(new BigDecimal("150.00"), result.get(0).get("average"));
+            // COUNT计算的是分组中的记录数，不是字段值的个数
+            assertEquals(3, result.get(0).get("count"));
+        }
+        
+        @Test
+        @DisplayName("测试空分组字段")
+        void testEmptyGroupByFields() {
+            config = new AggregateConfig();
+            config.setGroupByFields(new ArrayList<>());
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 100));
+            inputData.add(createRow("type", "B", "value", 200));
+            inputData.add(createRow("type", "C", "value", 300));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            // 所有数据应该被分到同一组
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("600"), result.get(0).get("total"));
+        }
+        
+        @Test
+        @DisplayName("测试null分组字段")
+        void testNullGroupByFields() {
+            config = new AggregateConfig();
+            config.setGroupByFields(null);
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 50));
+            inputData.add(createRow("type", "B", "value", 100));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            // 所有数据应该被分到同一组
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("150"), result.get(0).get("total"));
+        }
+        
+        @Test
+        @DisplayName("测试数据中包含分组字段为null的情况")
+        void testNullGroupFieldValue() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("category", "A", "amount", 100));
+            inputData.add(createRow("category", null, "amount", 200));
+            inputData.add(createRow("category", null, "amount", 300));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            // 应该有2个分组：A 和 null
+            assertEquals(2, result.size());
+            
+            Map<String, Object> groupA = findGroupByCategory(result, "A");
+            assertNotNull(groupA);
+            assertEquals(new BigDecimal("100"), groupA.get("total"));
+            
+            // 找到null分组
+            Map<String, Object> nullGroup = result.stream()
+                .filter(row -> row.get("category") == null)
+                .findFirst()
+                .orElse(null);
+            assertNotNull(nullGroup);
+            assertEquals(new BigDecimal("500"), nullGroup.get("total"));
+        }
+        
+        @Test
+        @DisplayName("测试大数据量")
+        void testLargeDataSet() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("category"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.SUM, "total"),
+                new AggregateField("value", AggregateType.COUNT, "count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            // 生成10000条数据，分为10个类别
+            for (int i = 0; i < 10000; i++) {
+                String category = "Category" + (i % 10);
+                inputData.add(createRow("category", category, "value", i));
+            }
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            // 应该有10个分组
+            assertEquals(10, result.size());
+            
+            // 验证每个分组的计数都是1000
+            for (Map<String, Object> row : result) {
+                assertEquals(1000, row.get("count"));
+            }
+        }
+    }
+    
+    @Nested
+    @DisplayName("数据类型测试")
+    class DataTypeTests {
+        
+        @Test
+        @DisplayName("测试BigDecimal类型")
+        void testBigDecimalType() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "amount", new BigDecimal("100.50")));
+            inputData.add(createRow("type", "A", "amount", new BigDecimal("200.75")));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("301.25"), result.get(0).get("total"));
+        }
+        
+        @Test
+        @DisplayName("测试Integer类型")
+        void testIntegerType() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", Integer.valueOf(100)));
+            inputData.add(createRow("type", "A", "value", Integer.valueOf(200)));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("300"), result.get(0).get("total"));
+        }
+        
+        @Test
+        @DisplayName("测试Long类型")
+        void testLongType() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.MAX, "max_value")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 1000000000L));
+            inputData.add(createRow("type", "A", "value", 2000000000L));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(2000000000L, result.get(0).get("max_value"));
+        }
+        
+        @Test
+        @DisplayName("测试Double类型")
+        void testDoubleType() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.AVG, "average")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", 10.5));
+            inputData.add(createRow("type", "A", "value", 20.5));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("15.50"), result.get(0).get("average"));
+        }
+        
+        @Test
+        @DisplayName("测试字符串转数字")
+        void testStringToNumber() {
+            config = new AggregateConfig();
+            config.setGroupByFields(Arrays.asList("type"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("value", AggregateType.SUM, "total")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            inputData.add(createRow("type", "A", "value", "100"));
+            inputData.add(createRow("type", "A", "value", "200.50"));
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(1, result.size());
+            assertEquals(new BigDecimal("300.50"), result.get(0).get("total"));
+        }
+    }
+    
+    @Nested
+    @DisplayName("复杂场景测试")
+    class ComplexScenarioTests {
+        
+        @Test
+        @DisplayName("测试完整的ETL流程：过滤+分组+多种聚合")
+        void testCompleteETLPipeline() {
+            config = new AggregateConfig();
+            // 只统计金额大于100的订单
+            config.setFilterExpression("amount > 100");
+            // 按城市和产品分类分组
+            config.setGroupByFields(Arrays.asList("city", "category"));
+            // 计算总金额、平均金额、订单数、最大和最小金额
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("amount", AggregateType.SUM, "total_amount"),
+                new AggregateField("amount", AggregateType.AVG, "avg_amount"),
+                new AggregateField("amount", AggregateType.COUNT, "order_count"),
+                new AggregateField("amount", AggregateType.MAX, "max_amount"),
+                new AggregateField("amount", AggregateType.MIN, "min_amount")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            
+            // Beijing + Electronics
+            addComplexRow(inputData, "Beijing", "Electronics", 150);
+            addComplexRow(inputData, "Beijing", "Electronics", 300);
+            addComplexRow(inputData, "Beijing", "Electronics", 50);  // 会被过滤掉
+            
+            // Beijing + Books
+            addComplexRow(inputData, "Beijing", "Books", 200);
+            addComplexRow(inputData, "Beijing", "Books", 80);  // 会被过滤掉
+            
+            // Shanghai + Electronics
+            addComplexRow(inputData, "Shanghai", "Electronics", 500);
+            addComplexRow(inputData, "Shanghai", "Electronics", 250);
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            // 应该有3个分组
+            assertEquals(3, result.size());
+            
+            // 验证 Beijing + Electronics
+            Map<String, Object> beijingElec = findGroup(result, "Beijing", "Electronics");
+            assertNotNull(beijingElec);
+            assertEquals(new BigDecimal("450"), beijingElec.get("total_amount"));  // 150 + 300
+            assertEquals(new BigDecimal("225.00"), beijingElec.get("avg_amount"));
+            assertEquals(2, beijingElec.get("order_count"));
+            assertEquals(300, beijingElec.get("max_amount"));
+            assertEquals(150, beijingElec.get("min_amount"));
+            
+            // 验证 Beijing + Books
+            Map<String, Object> beijingBooks = findGroup(result, "Beijing", "Books");
+            assertNotNull(beijingBooks);
+            assertEquals(new BigDecimal("200"), beijingBooks.get("total_amount"));
+            assertEquals(1, beijingBooks.get("order_count"));
+            
+            // 验证 Shanghai + Electronics
+            Map<String, Object> shanghaiElec = findGroup(result, "Shanghai", "Electronics");
+            assertNotNull(shanghaiElec);
+            assertEquals(new BigDecimal("750"), shanghaiElec.get("total_amount"));  // 500 + 250
+            assertEquals(new BigDecimal("375.00"), shanghaiElec.get("avg_amount"));
+            assertEquals(2, shanghaiElec.get("order_count"));
+        }
+        
+        @Test
+        @DisplayName("测试实际业务场景：销售数据分析")
+        void testSalesDataAnalysis() {
+            config = new AggregateConfig();
+            config.setFilterExpression("sales_amount >= 1000");
+            config.setGroupByFields(Arrays.asList("sales_person"));
+            config.setAggregateFields(Arrays.asList(
+                new AggregateField("sales_amount", AggregateType.SUM, "total_sales"),
+                new AggregateField("commission", AggregateType.SUM, "total_commission"),
+                new AggregateField("sales_amount", AggregateType.AVG, "avg_order_value"),
+                new AggregateField("sales_amount", AggregateType.COUNT, "order_count")
+            ));
+            engine = new AggregateEngine(config);
+            
+            List<Map<String, Object>> inputData = new ArrayList<>();
+            
+            // 销售员 Zhang San
+            addSalesRecord(inputData, "Zhang San", 1500, 150);
+            addSalesRecord(inputData, "Zhang San", 2000, 200);
+            addSalesRecord(inputData, "Zhang San", 800, 80);   // 会被过滤
+            
+            // 销售员 Li Si
+            addSalesRecord(inputData, "Li Si", 5000, 500);
+            addSalesRecord(inputData, "Li Si", 3000, 300);
+            addSalesRecord(inputData, "Li Si", 500, 50);    // 会被过滤
+            
+            List<Map<String, Object>> result = engine.aggregate(inputData);
+            
+            assertEquals(2, result.size());
+            
+            // 验证 Zhang San
+            Map<String, Object> zhangSan = findGroupByCategory(result, "Zhang San", "sales_person");
+            assertNotNull(zhangSan);
+            assertEquals(new BigDecimal("3500"), zhangSan.get("total_sales"));
+            assertEquals(new BigDecimal("350"), zhangSan.get("total_commission"));
+            assertEquals(new BigDecimal("1750.00"), zhangSan.get("avg_order_value"));
+            assertEquals(2, zhangSan.get("order_count"));
+            
+            // 验证 Li Si
+            Map<String, Object> liSi = findGroupByCategory(result, "Li Si", "sales_person");
+            assertNotNull(liSi);
+            assertEquals(new BigDecimal("8000"), liSi.get("total_sales"));
+            assertEquals(new BigDecimal("800"), liSi.get("total_commission"));
+            assertEquals(new BigDecimal("4000.00"), liSi.get("avg_order_value"));
+            assertEquals(2, liSi.get("order_count"));
+        }
+    }
+    
+    // ============= 辅助方法 =============
+    
+    /**
+     * 创建一行测试数据
+     */
+    private Map<String, Object> createRow(Object... keyValues) {
+        Map<String, Object> row = new HashMap<>();
+        for (int i = 0; i < keyValues.length; i += 2) {
+            row.put((String) keyValues[i], keyValues[i + 1]);
+        }
+        return row;
+    }
+    
+    /**
+     * 根据category字段查找分组
+     */
+    private Map<String, Object> findGroupByCategory(List<Map<String, Object>> result, Object categoryValue) {
+        return findGroupByCategory(result, categoryValue, "category");
+    }
+    
+    /**
+     * 根据指定字段查找分组
+     */
+    private Map<String, Object> findGroupByCategory(List<Map<String, Object>> result, Object value, String fieldName) {
+        return result.stream()
+            .filter(row -> value.equals(row.get(fieldName)))
+            .findFirst()
+            .orElse(null);
+    }
+    
+    /**
+     * 根据city和category查找分组
+     */
+    private Map<String, Object> findGroup(List<Map<String, Object>> result, Object city, Object category) {
+        return result.stream()
+            .filter(row -> city.equals(row.get("city")) && category.equals(row.get("category")))
+            .findFirst()
+            .orElse(null);
+    }
+    
+    /**
+     * 添加复杂场景的测试数据
+     */
+    private void addComplexRow(List<Map<String, Object>> data, String city, String category, int amount) {
+        Map<String, Object> row = new HashMap<>();
+        row.put("city", city);
+        row.put("category", category);
+        row.put("amount", amount);
+        data.add(row);
+    }
+    
+    /**
+     * 添加销售记录
+     */
+    private void addSalesRecord(List<Map<String, Object>> data, String salesPerson, int salesAmount, int commission) {
+        Map<String, Object> row = new HashMap<>();
+        row.put("sales_person", salesPerson);
+        row.put("sales_amount", salesAmount);
+        row.put("commission", commission);
+        data.add(row);
+    }
+}
+
