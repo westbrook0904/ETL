@@ -1,116 +1,346 @@
 -- =====================================================
--- ETL 数据处理管道 - 数据库表设计
+-- 抽取组件配置 - 数据库表设计
 -- =====================================================
 
--- 1. 管道基础信息表
-CREATE TABLE pipeline_basic_info (
-    pipeline_code VARCHAR(64) PRIMARY KEY COMMENT '管道编码',
-    name VARCHAR(128) NOT NULL COMMENT '管道名称',
-    description VARCHAR(512) COMMENT '管道描述',
-    version INT DEFAULT 1 COMMENT '管道版本',
-    status TINYINT DEFAULT 0 COMMENT '管道状态：0-草稿 1-启用 2-禁用 3-已归档',
-    schedule_config VARCHAR(256) COMMENT '调度配置（cron表达式或其他调度策略）',
-    creator VARCHAR(64) COMMENT '创建人',
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    updater VARCHAR(64) COMMENT '更新人',
-    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    remark VARCHAR(512) COMMENT '备注',
-    INDEX idx_status (status),
-    INDEX idx_create_time (create_time)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='管道基础信息表';
-
--- 2. 抽取组件基础信息表
-CREATE TABLE extraction_component_basic_info (
-    component_code VARCHAR(64) PRIMARY KEY COMMENT '组件编码',
-    name VARCHAR(128) NOT NULL COMMENT '组件名称',
-    description VARCHAR(512) COMMENT '组件描述',
-    extraction_type VARCHAR(32) NOT NULL COMMENT '抽取类型：DIM-维度抽取、FACT-事实抽取',
-    data_source_type VARCHAR(32) NOT NULL COMMENT '数据源类型：DB-数据库、MQ-消息队列、API-接口、FILE-文件、STREAM-流',
-    data_source_id VARCHAR(64) COMMENT '数据源连接ID（外键）',
-    is_incremental TINYINT DEFAULT 0 COMMENT '是否增量抽取：0-全量 1-增量',
-    incremental_field VARCHAR(64) COMMENT '增量标识字段',
-    status TINYINT DEFAULT 0 COMMENT '状态：0-草稿 1-已发布 2-已弃用',
-    creator VARCHAR(64) COMMENT '创建人',
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    updater VARCHAR(64) COMMENT '更新人',
-    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    INDEX idx_extraction_type (extraction_type),
-    INDEX idx_data_source_type (data_source_type),
-    INDEX idx_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='抽取组件基础信息表';
-
--- 3. 转换组件基础信息表
-CREATE TABLE transform_component_basic_info (
-    component_code VARCHAR(64) PRIMARY KEY COMMENT '组件编码',
-    name VARCHAR(128) NOT NULL COMMENT '组件名称',
-    description VARCHAR(512) COMMENT '组件描述',
-    transform_type VARCHAR(32) NOT NULL COMMENT '转换类型：MAPPING-映射、FILTER-过滤、ROUTE-路由、AGGREGATE-聚合、JOIN-关联',
-    multiple_inputs TINYINT DEFAULT 0 COMMENT '是否支持多输入：0-单输入 1-多输入',
-    multiple_outputs TINYINT DEFAULT 0 COMMENT '是否支持多输出：0-单输出 1-多输出',
-    status TINYINT DEFAULT 0 COMMENT '状态：0-草稿 1-已发布 2-已弃用',
-    creator VARCHAR(64) COMMENT '创建人',
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    updater VARCHAR(64) COMMENT '更新人',
-    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    INDEX idx_transform_type (transform_type),
-    INDEX idx_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='转换组件基础信息表';
-
--- 4. 加载组件基础信息表
-CREATE TABLE load_component_basic_info (
-    component_code VARCHAR(64) PRIMARY KEY COMMENT '组件编码',
-    name VARCHAR(128) NOT NULL COMMENT '组件名称',
-    description VARCHAR(512) COMMENT '组件描述',
-    data_source_type VARCHAR(32) NOT NULL COMMENT '数据源类型：DB-数据库、API-接口、MQ-消息队列、FILE-文件、CACHE-缓存',
-    data_source_id VARCHAR(64) COMMENT '数据源连接ID（外键）',
-    load_mode VARCHAR(32) DEFAULT 'INSERT' COMMENT '加载模式：INSERT-插入、UPDATE-更新、UPSERT-插入或更新、DELETE-删除',
-    batch_size INT DEFAULT 1000 COMMENT '批量大小',
-    status TINYINT DEFAULT 0 COMMENT '状态：0-草稿 1-已发布 2-已弃用',
-    creator VARCHAR(64) COMMENT '创建人',
-    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    updater VARCHAR(64) COMMENT '更新人',
-    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    INDEX idx_data_source_type (data_source_type),
-    INDEX idx_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='加载组件基础信息表';
-
--- 5. 管道组件实例表
-CREATE TABLE pipeline_component_instance (
-    instance_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '实例ID',
-    pipeline_code VARCHAR(64) NOT NULL COMMENT '管道编码',
-    component_code VARCHAR(64) NOT NULL COMMENT '组件编码',
-    component_type VARCHAR(32) NOT NULL COMMENT '组件类型：EXTRACTION_DIM、EXTRACTION_FACT、TRANSFORM、LOAD',
-    instance_name VARCHAR(128) COMMENT '组件在管道中的别名',
-    execution_order INT COMMENT '执行顺序',
-    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
-    exception_handler VARCHAR(32) DEFAULT 'FAIL' COMMENT '异常处理策略：SKIP-跳过、RETRY-重试、FAIL-失败终止、CONTINUE-继续',
-    retry_times INT DEFAULT 0 COMMENT '重试次数',
-    retry_interval INT DEFAULT 0 COMMENT '重试间隔（秒）',
+-- 1. 抽取数据库配置主表
+CREATE TABLE extraction_db_config (
+    config_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '配置ID',
+    component_code VARCHAR(64) NOT NULL COMMENT '抽取组件编码（外键）',
+    data_source_id VARCHAR(64) NOT NULL COMMENT '数据源ID（外键）',
+    schema_name VARCHAR(128) COMMENT '数据库schema名称',
+    table_name VARCHAR(128) NOT NULL COMMENT '表名',
+    
+    -- 分页配置
+    page_size INT DEFAULT 1000 COMMENT '分页大小',
+    page_number INT DEFAULT 1 COMMENT '起始页码',
+    
+    -- 游标配置（用于大数据量抽取）
+    cursor_field VARCHAR(64) COMMENT '游标字段名，为空则默认为id',
+    cursor_field_type VARCHAR(32) DEFAULT 'LONG' COMMENT '游标字段类型：LONG、STRING、TIMESTAMP',
+    
+    -- 其他配置
+    enable_pagination TINYINT DEFAULT 1 COMMENT '是否启用分页：0-否 1-是',
+    fetch_timeout INT DEFAULT 300 COMMENT '查询超时时间（秒）',
+    
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    FOREIGN KEY (pipeline_code) REFERENCES pipeline_basic_info(pipeline_code) ON DELETE CASCADE,
-    INDEX idx_pipeline_code (pipeline_code),
+    
+    FOREIGN KEY (component_code) REFERENCES extraction_component_basic_info(component_code) ON DELETE CASCADE,
     INDEX idx_component_code (component_code),
-    INDEX idx_component_type (component_type),
-    UNIQUE KEY uk_pipeline_component (pipeline_code, component_code)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='管道组件实例表';
+    INDEX idx_data_source (data_source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='抽取数据库配置主表';
 
--- 6. 管道组件关系表（DAG）
-CREATE TABLE pipeline_component_relation (
-    relation_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '关系ID',
-    pipeline_code VARCHAR(64) NOT NULL COMMENT '管道编码',
-    source_instance_id BIGINT NOT NULL COMMENT '上游组件实例ID',
-    target_instance_id BIGINT NOT NULL COMMENT '下游组件实例ID',
-    relation_type VARCHAR(32) DEFAULT 'SEQUENTIAL' COMMENT '关系类型：SEQUENTIAL-顺序、PARALLEL-并行、CONDITIONAL-条件',
-    condition_expression VARCHAR(512) COMMENT '条件表达式',
-    output_port VARCHAR(64) COMMENT '输出端口名称',
-    input_port VARCHAR(64) COMMENT '输入端口名称',
+-- 2. 抽取字段配置表
+CREATE TABLE extraction_field_config (
+    field_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '字段ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    field_name VARCHAR(128) NOT NULL COMMENT '字段名',
+    field_type VARCHAR(32) NOT NULL COMMENT '字段类型：STRING、NUMBER、DATE、TIMESTAMP、BOOLEAN',
+    
+    -- 函数支持（如 SUM(amount)、CONCAT(first_name, last_name)）
+    method_name VARCHAR(64) COMMENT '函数名：SUM、AVG、MAX、MIN、COUNT、CONCAT等',
+    method_params TEXT COMMENT '函数参数（JSON格式）',
+    
+    -- 别名
+    alias VARCHAR(128) COMMENT '字段别名',
+    
+    -- 顺序和状态
+    field_order INT NOT NULL COMMENT '字段顺序',
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    FOREIGN KEY (pipeline_code) REFERENCES pipeline_basic_info(pipeline_code) ON DELETE CASCADE,
-    FOREIGN KEY (source_instance_id) REFERENCES pipeline_component_instance(instance_id) ON DELETE CASCADE,
-    FOREIGN KEY (target_instance_id) REFERENCES pipeline_component_instance(instance_id) ON DELETE CASCADE,
-    INDEX idx_pipeline_code (pipeline_code),
-    INDEX idx_source_instance (source_instance_id),
-    INDEX idx_target_instance (target_instance_id),
-    UNIQUE KEY uk_relation (source_instance_id, target_instance_id, output_port, input_port)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='管道组件关系表';
+    
+    FOREIGN KEY (config_id) REFERENCES extraction_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_field_order (config_id, field_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='抽取字段配置表';
+
+-- 3. 过滤条件配置表（支持树形结构）
+CREATE TABLE extraction_filter_config (
+    filter_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '过滤条件ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    parent_filter_id BIGINT COMMENT '父过滤条件ID（用于嵌套逻辑）',
+    
+    -- 条件类型
+    condition_type VARCHAR(32) NOT NULL COMMENT '条件类型：EXPRESSION-表达式条件、LOGICAL-逻辑条件',
+    
+    -- 表达式条件字段（当condition_type=EXPRESSION时使用）
+    field_name VARCHAR(128) COMMENT '字段名',
+    field_type VARCHAR(32) COMMENT '字段类型：STRING、NUMBER、DATE、TIMESTAMP',
+    operator VARCHAR(16) COMMENT '比较运算符：=、!=、>、<、>=、<=、LIKE、IN、IS NULL、IS NOT NULL',
+    
+    -- 值配置
+    value_type VARCHAR(32) COMMENT '值类型：CONSTANT-常量、PLACEHOLDER-占位符、FUNCTION-函数',
+    value_content TEXT COMMENT '值内容',
+    is_required TINYINT DEFAULT 0 COMMENT '是否必填：0-否 1-是',
+    
+    -- 逻辑运算符（用于组合条件）
+    logical_operator VARCHAR(8) DEFAULT 'AND' COMMENT '逻辑运算符：AND、OR',
+    
+    -- 执行顺序
+    execute_sequence INT NOT NULL COMMENT '执行顺序',
+    
+    -- 状态
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    FOREIGN KEY (config_id) REFERENCES extraction_db_config(config_id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_filter_id) REFERENCES extraction_filter_config(filter_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_parent_filter (parent_filter_id),
+    INDEX idx_execute_sequence (config_id, execute_sequence)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='过滤条件配置表';
+
+-- 4. 动态过滤条件配置表
+CREATE TABLE extraction_dynamic_filter_config (
+    dynamic_filter_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '动态过滤ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    -- 上游组件配置
+    source_component_code VARCHAR(64) NOT NULL COMMENT '上游组件编码',
+    
+    -- 组合逻辑
+    combine_operator VARCHAR(8) DEFAULT 'OR' COMMENT '多组条件的组合方式：AND、OR',
+    
+    -- 状态
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    FOREIGN KEY (config_id) REFERENCES extraction_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_source_component (source_component_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='动态过滤条件配置表';
+
+-- 5. 动态过滤字段映射表
+CREATE TABLE extraction_dynamic_filter_field (
+    field_mapping_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '字段映射ID',
+    dynamic_filter_id BIGINT NOT NULL COMMENT '动态过滤ID（外键）',
+    
+    -- 当前表字段
+    field_name VARCHAR(128) NOT NULL COMMENT '当前表的字段名',
+    field_type VARCHAR(32) NOT NULL COMMENT '字段类型：STRING、NUMBER、DATE、TIMESTAMP',
+    
+    -- 引用字段（从上游组件结果集获取）
+    reference_field VARCHAR(128) NOT NULL COMMENT '引用字段名（上游组件的字段）',
+    
+    -- 比较运算符
+    operator VARCHAR(16) DEFAULT '=' COMMENT '比较运算符：=、!=、>、<、>=、<=、LIKE、IN',
+    
+    -- 顺序
+    field_order INT NOT NULL COMMENT '字段顺序',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (dynamic_filter_id) REFERENCES extraction_dynamic_filter_config(dynamic_filter_id) ON DELETE CASCADE,
+    INDEX idx_dynamic_filter (dynamic_filter_id),
+    INDEX idx_field_order (dynamic_filter_id, field_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='动态过滤字段映射表';
+
+-- 6. 排序字段配置表
+CREATE TABLE extraction_order_config (
+    order_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '排序ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    field_name VARCHAR(128) NOT NULL COMMENT '排序字段名',
+    order_type VARCHAR(8) DEFAULT 'ASC' COMMENT '排序方向：ASC-升序、DESC-降序',
+    order_sequence INT NOT NULL COMMENT '排序顺序（多字段排序）',
+    
+    -- 空值处理
+    nulls_position VARCHAR(16) DEFAULT 'LAST' COMMENT '空值位置：FIRST-排在前面、LAST-排在后面',
+    
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (config_id) REFERENCES extraction_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_order_sequence (config_id, order_sequence)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='排序字段配置表';
+
+-- 7. 分组字段配置表
+CREATE TABLE extraction_group_config (
+    group_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '分组ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    field_name VARCHAR(128) NOT NULL COMMENT '分组字段名',
+    group_sequence INT NOT NULL COMMENT '分组顺序',
+    
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (config_id) REFERENCES extraction_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_group_sequence (config_id, group_sequence)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分组字段配置表';
+
+-- =====================================================
+-- 示例数据
+-- =====================================================
+
+-- 示例1：简单的用户表抽取
+INSERT INTO extraction_db_config (component_code, data_source_id, table_name, page_size)
+VALUES ('EXTRACT_USER_001', 'DS_MYSQL_001', 'users', 1000);
+
+SET @config_id = LAST_INSERT_ID();
+
+-- 抽取字段配置
+INSERT INTO extraction_field_config (config_id, field_name, field_type, field_order) VALUES
+(@config_id, 'id', 'NUMBER', 1),
+(@config_id, 'username', 'STRING', 2),
+(@config_id, 'email', 'STRING', 3),
+(@config_id, 'created_at', 'TIMESTAMP', 4);
+
+-- 过滤条件：status = 'ACTIVE' AND created_at > '2024-01-01'
+INSERT INTO extraction_filter_config (config_id, condition_type, field_name, field_type, operator, value_type, value_content, logical_operator, execute_sequence) VALUES
+(@config_id, 'EXPRESSION', 'status', 'STRING', '=', 'CONSTANT', 'ACTIVE', 'AND', 1),
+(@config_id, 'EXPRESSION', 'created_at', 'TIMESTAMP', '>', 'CONSTANT', '2024-01-01', 'AND', 2);
+
+-- 排序配置
+INSERT INTO extraction_order_config (config_id, field_name, order_type, order_sequence) VALUES
+(@config_id, 'created_at', 'DESC', 1),
+(@config_id, 'id', 'ASC', 2);
+
+-- 示例2：复杂的订单统计（带分组和函数）
+INSERT INTO extraction_db_config (component_code, data_source_id, table_name, page_size)
+VALUES ('EXTRACT_ORDER_STATS', 'DS_MYSQL_001', 'orders', 5000);
+
+SET @config_id2 = LAST_INSERT_ID();
+
+-- 抽取字段配置（带聚合函数）
+INSERT INTO extraction_field_config (config_id, field_name, field_type, method_name, alias, field_order) VALUES
+(@config_id2, 'user_id', 'NUMBER', NULL, NULL, 1),
+(@config_id2, 'amount', 'NUMBER', 'SUM', 'total_amount', 2),
+(@config_id2, 'id', 'NUMBER', 'COUNT', 'order_count', 3);
+
+-- 分组配置
+INSERT INTO extraction_group_config (config_id, field_name, group_sequence) VALUES
+(@config_id2, 'user_id', 1);
+
+-- 过滤条件（嵌套逻辑）：(status = 'PAID' OR status = 'COMPLETED') AND amount > 0
+-- 先创建父逻辑条件
+INSERT INTO extraction_filter_config (config_id, condition_type, logical_operator, execute_sequence) VALUES
+(@config_id2, 'LOGICAL', 'AND', 1);
+
+SET @parent_filter_id = LAST_INSERT_ID();
+
+-- 创建子条件
+INSERT INTO extraction_filter_config (config_id, parent_filter_id, condition_type, field_name, field_type, operator, value_type, value_content, logical_operator, execute_sequence) VALUES
+(@config_id2, @parent_filter_id, 'EXPRESSION', 'status', 'STRING', '=', 'CONSTANT', 'PAID', 'OR', 1),
+(@config_id2, @parent_filter_id, 'EXPRESSION', 'status', 'STRING', '=', 'CONSTANT', 'COMPLETED', 'OR', 2),
+(@config_id2, @parent_filter_id, 'EXPRESSION', 'amount', 'NUMBER', '>', 'CONSTANT', '0', 'AND', 3);
+
+-- 示例3：动态过滤（根据上游组件结果）
+INSERT INTO extraction_db_config (component_code, data_source_id, table_name, page_size)
+VALUES ('EXTRACT_ORDER_DETAIL', 'DS_MYSQL_001', 'order_details', 1000);
+
+SET @config_id3 = LAST_INSERT_ID();
+
+-- 动态过滤配置：根据上游用户ID列表动态生成过滤条件
+INSERT INTO extraction_dynamic_filter_config (config_id, source_component_code, combine_operator)
+VALUES (@config_id3, 'EXTRACT_USER_001', 'OR');
+
+SET @dynamic_filter_id = LAST_INSERT_ID();
+
+-- 动态过滤字段映射：order_details.user_id IN (上游结果集的user_id)
+INSERT INTO extraction_dynamic_filter_field (dynamic_filter_id, field_name, field_type, reference_field, operator, field_order) VALUES
+(@dynamic_filter_id, 'user_id', 'NUMBER', 'id', '=', 1);
+
+-- =====================================================
+-- 查询示例
+-- =====================================================
+
+-- 查询1：获取完整的抽取配置
+SELECT 
+    edc.config_id,
+    edc.component_code,
+    edc.table_name,
+    edc.page_size,
+    COUNT(DISTINCT efc.field_id) as field_count,
+    COUNT(DISTINCT efc2.filter_id) as filter_count,
+    COUNT(DISTINCT eoc.order_id) as order_count,
+    COUNT(DISTINCT egc.group_id) as group_count
+FROM extraction_db_config edc
+LEFT JOIN extraction_field_config efc ON edc.config_id = efc.config_id
+LEFT JOIN extraction_filter_config efc2 ON edc.config_id = efc2.config_id
+LEFT JOIN extraction_order_config eoc ON edc.config_id = eoc.config_id
+LEFT JOIN extraction_group_config egc ON edc.config_id = egc.config_id
+WHERE edc.component_code = 'EXTRACT_USER_001'
+GROUP BY edc.config_id;
+
+-- 查询2：获取过滤条件树（递归查询）
+WITH RECURSIVE filter_tree AS (
+    -- 根节点
+    SELECT 
+        filter_id,
+        parent_filter_id,
+        condition_type,
+        field_name,
+        operator,
+        value_content,
+        logical_operator,
+        execute_sequence,
+        0 as level,
+        CAST(filter_id AS CHAR(200)) as path
+    FROM extraction_filter_config
+    WHERE config_id = @config_id AND parent_filter_id IS NULL
+    
+    UNION ALL
+    
+    -- 子节点
+    SELECT 
+        efc.filter_id,
+        efc.parent_filter_id,
+        efc.condition_type,
+        efc.field_name,
+        efc.operator,
+        efc.value_content,
+        efc.logical_operator,
+        efc.execute_sequence,
+        ft.level + 1,
+        CONCAT(ft.path, '->', efc.filter_id)
+    FROM extraction_filter_config efc
+    INNER JOIN filter_tree ft ON efc.parent_filter_id = ft.filter_id
+)
+SELECT * FROM filter_tree ORDER BY path, execute_sequence;
+
+-- 查询3：获取抽取字段（按顺序）
+SELECT 
+    field_name,
+    field_type,
+    method_name,
+    alias,
+    CASE 
+        WHEN method_name IS NOT NULL THEN CONCAT(method_name, '(', field_name, ')')
+        ELSE field_name
+    END as select_expression
+FROM extraction_field_config
+WHERE config_id = @config_id2 AND enabled = 1
+ORDER BY field_order;
+
+-- 查询4：生成完整的SQL（示例）
+-- 这个查询展示如何从配置表生成实际的SQL语句
+SELECT 
+    CONCAT(
+        'SELECT ',
+        GROUP_CONCAT(
+            CASE 
+                WHEN efc.method_name IS NOT NULL 
+                THEN CONCAT(efc.method_name, '(', efc.field_name, ') AS ', efc.alias)
+                ELSE efc.field_name
+            END
+            ORDER BY efc.field_order
+            SEPARATOR ', '
+        ),
+        ' FROM ', edc.table_name
+    ) as generated_sql
+FROM extraction_db_config edc
+LEFT JOIN extraction_field_config efc ON edc.config_id = efc.config_id AND efc.enabled = 1
+WHERE edc.config_id = @config_id
+GROUP BY edc.config_id;
+
