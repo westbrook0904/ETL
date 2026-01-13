@@ -1,0 +1,338 @@
+-- =====================================================
+-- 转换组件配置 - 优化后数据库表设计（5张表）
+-- =====================================================
+
+-- 1. 映射转换配置表
+CREATE TABLE transform_mapping_config (
+    mapping_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '映射ID',
+    component_code VARCHAR(64) NOT NULL COMMENT '转换组件编码（外键）',
+    
+    -- 来源信息（必须设置）
+    source_component_code VARCHAR(64) NOT NULL COMMENT '来源组件编码',
+    
+    -- 源字段
+    source_field VARCHAR(128) COMMENT '源字段名（常量映射时可为空）',
+    source_type VARCHAR(32) COMMENT '源字段类型：STRING、NUMBER、DATE、TIMESTAMP、BOOLEAN',
+    source_desc VARCHAR(256) COMMENT '源字段描述',
+    
+    -- 目标字段
+    target_field VARCHAR(128) NOT NULL COMMENT '目标字段名',
+    target_type VARCHAR(32) NOT NULL COMMENT '目标字段类型：STRING、NUMBER、DATE、TIMESTAMP、BOOLEAN',
+    target_desc VARCHAR(256) COMMENT '目标字段描述',
+    
+    -- 映射规则
+    map_type VARCHAR(32) NOT NULL COMMENT '映射类型：DIRECT-原值、CONSTANT-常量、DEFAULT-默认值、EXPRESSION-表达式、FUNCTION-函数',
+    map_param TEXT COMMENT '映射参数（JSON格式）',
+    
+    -- 顺序和状态
+    mapping_order INT NOT NULL COMMENT '映射顺序',
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    FOREIGN KEY (component_code) REFERENCES transform_component_basic_info(component_code) ON DELETE CASCADE,
+    INDEX idx_component_code (component_code),
+    INDEX idx_source_component (source_component_code),
+    INDEX idx_mapping_order (component_code, mapping_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='映射转换配置表';
+
+-- 2. 收敛转换配置主表（优化：分组字段和额外字段直接存储）
+CREATE TABLE transform_converge_config (
+    converge_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '收敛配置ID',
+    component_code VARCHAR(64) NOT NULL UNIQUE COMMENT '转换组件编码（外键，一对一关系）',
+    
+    -- 分组字段（优化：用|分割存储）
+    group_fields VARCHAR(512) COMMENT '分组字段，多个用|分割，如：user_id|region|category',
+    
+    -- 额外字段（优化：用|分割存储）
+    extra_fields VARCHAR(512) COMMENT '额外字段（非空携带），多个用|分割，如：user_name|vip_level',
+    
+    -- 过滤条件逻辑
+    filter_logical_operator VARCHAR(8) DEFAULT 'AND' COMMENT '过滤条件逻辑运算符：AND、OR',
+    
+    -- 状态
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    FOREIGN KEY (component_code) REFERENCES transform_component_basic_info(component_code) ON DELETE CASCADE,
+    INDEX idx_component_code (component_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收敛转换配置主表';
+
+-- 3. 收敛字段配置表
+CREATE TABLE transform_converge_field (
+    field_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '字段ID',
+    converge_id BIGINT NOT NULL COMMENT '收敛配置ID（外键）',
+    
+    field_name VARCHAR(128) NOT NULL COMMENT '字段名',
+    converge_type VARCHAR(32) NOT NULL COMMENT '收敛类型：SUM-求和、AVG-平均、MAX-最大、MIN-最小、COUNT-计数、FIRST-首个、LAST-末个',
+    output_field_name VARCHAR(128) NOT NULL COMMENT '输出字段名',
+    
+    -- 顺序
+    field_order INT NOT NULL COMMENT '字段顺序',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (converge_id) REFERENCES transform_converge_config(converge_id) ON DELETE CASCADE,
+    INDEX idx_converge_id (converge_id),
+    INDEX idx_field_order (converge_id, field_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='收敛字段配置表';
+
+-- 4. 路由转换配置表
+CREATE TABLE transform_route_config (
+    route_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '路由ID',
+    component_code VARCHAR(64) NOT NULL COMMENT '转换组件编码（外键）',
+    
+    -- 下游信息（必须设置）
+    downstream_component_code VARCHAR(64) NOT NULL COMMENT '下游组件编码',
+    
+    -- 路由信息
+    route_name VARCHAR(128) NOT NULL COMMENT '路由名称',
+    route_desc VARCHAR(256) COMMENT '路由描述',
+    
+    -- 条件逻辑
+    logical_operator VARCHAR(8) DEFAULT 'AND' COMMENT '条件间逻辑关系：AND、OR',
+    
+    -- 优先级（数字越小优先级越高）
+    priority INT DEFAULT 0 COMMENT '路由优先级',
+    
+    -- 是否默认路由（所有条件都不满足时走默认路由）
+    is_default TINYINT DEFAULT 0 COMMENT '是否默认路由：0-否 1-是（每个组件只能有一个默认路由）',
+    
+    -- 状态
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    FOREIGN KEY (component_code) REFERENCES transform_component_basic_info(component_code) ON DELETE CASCADE,
+    INDEX idx_component_code (component_code),
+    INDEX idx_downstream_component (downstream_component_code),
+    INDEX idx_priority (component_code, priority),
+    UNIQUE KEY uk_default_route (component_code, is_default)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='路由转换配置表';
+
+-- 5. 转换过滤条件表（通用，被收敛和路由使用）
+CREATE TABLE transform_filter_condition (
+    condition_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '条件ID',
+    
+    -- 关联配置（二选一）
+    converge_id BIGINT COMMENT '收敛配置ID（外键，可为空）',
+    route_id BIGINT COMMENT '路由配置ID（外键，可为空）',
+    
+    -- 条件字段
+    field_name VARCHAR(128) NOT NULL COMMENT '字段名',
+    operator VARCHAR(16) NOT NULL COMMENT '运算符：=、!=、>、<、>=、<=、LIKE、IN、IS NULL、IS NOT NULL',
+    value_content TEXT COMMENT '比较值（JSON格式）',
+    data_type VARCHAR(32) NOT NULL COMMENT '数据类型：STRING、NUMBER、DATE、TIMESTAMP、BOOLEAN',
+    
+    -- 顺序
+    condition_order INT NOT NULL COMMENT '条件顺序',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (converge_id) REFERENCES transform_converge_config(converge_id) ON DELETE CASCADE,
+    FOREIGN KEY (route_id) REFERENCES transform_route_config(route_id) ON DELETE CASCADE,
+    INDEX idx_converge_id (converge_id),
+    INDEX idx_route_id (route_id),
+    INDEX idx_condition_order (route_id, condition_order),
+    CHECK (converge_id IS NOT NULL OR route_id IS NOT NULL)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='转换过滤条件表';
+
+-- =====================================================
+-- 示例数据
+-- =====================================================
+
+-- 示例1：映射转换配置（字段映射和类型转换）
+INSERT INTO transform_component_basic_info (component_code, name, transform_type, status)
+VALUES ('TRANSFORM_USER_MAPPING', '用户字段映射', 'MAPPING', 1);
+
+INSERT INTO transform_mapping_config (component_code, source_component_code, source_field, source_type, target_field, target_type, map_type, map_param, mapping_order) VALUES
+('TRANSFORM_USER_MAPPING', 'EXTRACT_USER', 'user_name', 'STRING', 'username', 'STRING', 'DIRECT', NULL, 1),
+('TRANSFORM_USER_MAPPING', 'EXTRACT_USER', 'user_age', 'NUMBER', 'age', 'NUMBER', 'DIRECT', NULL, 2),
+('TRANSFORM_USER_MAPPING', 'EXTRACT_USER', 'create_time', 'TIMESTAMP', 'created_at', 'STRING', 'FUNCTION', '{"function":"DATE_FORMAT","params":["YYYY-MM-DD HH:mm:ss"]}', 3),
+('TRANSFORM_USER_MAPPING', 'EXTRACT_USER', 'status', 'NUMBER', 'status_name', 'STRING', 'EXPRESSION', '{"expression":"CASE WHEN status=1 THEN \'ACTIVE\' ELSE \'INACTIVE\' END"}', 4),
+('TRANSFORM_USER_MAPPING', NULL, NULL, NULL, 'data_source', 'STRING', 'CONSTANT', '{"value":"MySQL"}', 5);
+
+-- 示例2：收敛转换配置（聚合统计）
+INSERT INTO transform_component_basic_info (component_code, name, transform_type, status)
+VALUES ('TRANSFORM_ORDER_CONVERGE', '订单收敛统计', 'AGGREGATE', 1);
+
+-- 优化：分组字段和额外字段直接存储，用|分割
+INSERT INTO transform_converge_config (component_code, group_fields, extra_fields, filter_logical_operator)
+VALUES ('TRANSFORM_ORDER_CONVERGE', 'user_id|region', 'user_name|vip_level', 'AND');
+
+SET @converge_id = LAST_INSERT_ID();
+
+-- 收敛字段
+INSERT INTO transform_converge_field (converge_id, field_name, converge_type, output_field_name, field_order) VALUES
+(@converge_id, 'amount', 'SUM', 'total_amount', 1),
+(@converge_id, 'order_id', 'COUNT', 'order_count', 2),
+(@converge_id, 'amount', 'AVG', 'avg_amount', 3),
+(@converge_id, 'created_at', 'MAX', 'last_order_time', 4);
+
+-- 过滤条件
+INSERT INTO transform_filter_condition (converge_id, field_name, operator, value_content, data_type, condition_order) VALUES
+(@converge_id, 'status', '=', '"PAID"', 'STRING', 1),
+(@converge_id, 'amount', '>', '0', 'NUMBER', 2);
+
+-- 示例3：路由转换配置（条件路由）
+INSERT INTO transform_component_basic_info (component_code, name, transform_type, status)
+VALUES ('TRANSFORM_ORDER_ROUTE', '订单路由分发', 'ROUTE', 1);
+
+-- 路由1：高价值订单
+INSERT INTO transform_route_config (component_code, downstream_component_code, route_name, logical_operator, priority)
+VALUES ('TRANSFORM_ORDER_ROUTE', 'LOAD_HIGH_VALUE', '高价值订单路由', 'AND', 1);
+
+SET @route_id1 = LAST_INSERT_ID();
+
+INSERT INTO transform_filter_condition (route_id, field_name, operator, value_content, data_type, condition_order) VALUES
+(@route_id1, 'amount', '>', '10000', 'NUMBER', 1),
+(@route_id1, 'vip_level', '>=', '3', 'NUMBER', 2);
+
+-- 路由2：普通订单
+INSERT INTO transform_route_config (component_code, downstream_component_code, route_name, logical_operator, priority)
+VALUES ('TRANSFORM_ORDER_ROUTE', 'LOAD_NORMAL', '普通订单路由', 'AND', 2);
+
+SET @route_id2 = LAST_INSERT_ID();
+
+INSERT INTO transform_filter_condition (route_id, field_name, operator, value_content, data_type, condition_order) VALUES
+(@route_id2, 'amount', '<=', '10000', 'NUMBER', 1),
+(@route_id2, 'status', '=', '"PAID"', 'STRING', 2);
+
+-- 路由3：默认路由（兜底）
+INSERT INTO transform_route_config (component_code, downstream_component_code, route_name, is_default, priority)
+VALUES ('TRANSFORM_ORDER_ROUTE', 'LOAD_DEFAULT', '默认路由', 1, 999);
+
+-- =====================================================
+-- 查询示例
+-- =====================================================
+
+-- 查询1：获取映射转换的完整配置
+SELECT 
+    tmc.mapping_id,
+    tmc.source_component_code,
+    tmc.source_field,
+    tmc.target_field,
+    tmc.map_type,
+    tmc.map_param,
+    CASE tmc.map_type
+        WHEN 'DIRECT' THEN CONCAT(tmc.source_field, ' → ', tmc.target_field)
+        WHEN 'CONSTANT' THEN CONCAT('常量 → ', tmc.target_field)
+        WHEN 'FUNCTION' THEN CONCAT('函数(', tmc.source_field, ') → ', tmc.target_field)
+        WHEN 'EXPRESSION' THEN CONCAT('表达式 → ', tmc.target_field)
+        ELSE CONCAT(tmc.source_field, ' → ', tmc.target_field)
+    END as mapping_rule
+FROM transform_mapping_config tmc
+WHERE tmc.component_code = 'TRANSFORM_USER_MAPPING'
+  AND tmc.enabled = 1
+ORDER BY tmc.mapping_order;
+
+-- 查询2：获取收敛转换的完整配置（优化：直接读取分组和额外字段）
+SELECT 
+    tcc.component_code,
+    tcc.group_fields,
+    tcc.extra_fields,
+    GROUP_CONCAT(
+        CONCAT(tcf.converge_type, '(', tcf.field_name, ') AS ', tcf.output_field_name) 
+        ORDER BY tcf.field_order 
+        SEPARATOR ', '
+    ) as converge_fields
+FROM transform_converge_config tcc
+LEFT JOIN transform_converge_field tcf ON tcc.converge_id = tcf.converge_id
+WHERE tcc.component_code = 'TRANSFORM_ORDER_CONVERGE'
+GROUP BY tcc.converge_id;
+
+-- 查询3：解析分组字段（从user_id|region分割为数组）
+SELECT 
+    component_code,
+    SUBSTRING_INDEX(SUBSTRING_INDEX(group_fields, '|', numbers.n), '|', -1) as group_field,
+    numbers.n as field_order
+FROM transform_converge_config
+JOIN (
+    SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
+    UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION SELECT 10
+) numbers
+WHERE numbers.n <= 1 + LENGTH(group_fields) - LENGTH(REPLACE(group_fields, '|', ''))
+  AND component_code = 'TRANSFORM_ORDER_CONVERGE'
+ORDER BY field_order;
+
+-- 查询4：获取路由转换的完整配置
+SELECT 
+    trc.route_id,
+    trc.route_name,
+    trc.downstream_component_code,
+    trc.logical_operator,
+    trc.priority,
+    trc.is_default,
+    COUNT(tfc.condition_id) as condition_count,
+    GROUP_CONCAT(
+        CONCAT(tfc.field_name, ' ', tfc.operator, ' ', tfc.value_content) 
+        ORDER BY tfc.condition_order 
+        SEPARATOR CONCAT(' ', trc.logical_operator, ' ')
+    ) as conditions
+FROM transform_route_config trc
+LEFT JOIN transform_filter_condition tfc ON trc.route_id = tfc.route_id
+WHERE trc.component_code = 'TRANSFORM_ORDER_ROUTE'
+  AND trc.enabled = 1
+GROUP BY trc.route_id
+ORDER BY trc.priority;
+
+-- 查询5：获取路由组件的上游数据源（从管道编排层）
+-- 注意：数据来源不在配置层，而在编排层的pipeline_component_relation表中
+SELECT 
+    pci_source.component_code as source_component_code,
+    pci_source.component_type as source_type,
+    pci_target.component_code as route_component_code,
+    pcr.relation_type
+FROM pipeline_component_relation pcr
+JOIN pipeline_component_instance pci_source 
+    ON pcr.source_instance_id = pci_source.instance_id
+JOIN pipeline_component_instance pci_target 
+    ON pcr.target_instance_id = pci_target.instance_id
+WHERE pci_target.component_code = 'TRANSFORM_ORDER_ROUTE';
+
+-- 查询6：生成收敛转换的完整SQL
+SELECT 
+    CONCAT(
+        'SELECT ',
+        tcc.group_fields, ', ',
+        GROUP_CONCAT(
+            CONCAT(tcf.converge_type, '(', tcf.field_name, ') AS ', tcf.output_field_name)
+            ORDER BY tcf.field_order
+            SEPARATOR ', '
+        ),
+        CASE WHEN tcc.extra_fields IS NOT NULL 
+            THEN CONCAT(', ', REPLACE(tcc.extra_fields, '|', ', '))
+            ELSE ''
+        END,
+        ' FROM input_data',
+        ' GROUP BY ', REPLACE(tcc.group_fields, '|', ', ')
+    ) as generated_sql
+FROM transform_converge_config tcc
+LEFT JOIN transform_converge_field tcf ON tcc.converge_id = tcf.converge_id
+WHERE tcc.component_code = 'TRANSFORM_ORDER_CONVERGE'
+GROUP BY tcc.converge_id;
+
+-- =====================================================
+-- 工具函数
+-- =====================================================
+
+-- 函数：分割字符串为数组（MySQL 8.0+可用JSON_TABLE）
+DELIMITER $$
+CREATE FUNCTION split_string(str VARCHAR(1000), delim VARCHAR(10), pos INT)
+RETURNS VARCHAR(255)
+DETERMINISTIC
+BEGIN
+    DECLARE result VARCHAR(255);
+    SET result = SUBSTRING_INDEX(SUBSTRING_INDEX(str, delim, pos), delim, -1);
+    RETURN result;
+END$$
+DELIMITER ;
+
+-- 使用示例
+-- SELECT split_string('user_id|region|category', '|', 1); -- 返回 'user_id'
+-- SELECT split_string('user_id|region|category', '|', 2); -- 返回 'region'
+
