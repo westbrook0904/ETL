@@ -1,0 +1,349 @@
+-- =====================================================
+-- 加载组件配置 - 数据库表设计（4张表）
+-- =====================================================
+
+-- 1. 加载数据库配置主表
+CREATE TABLE load_db_config (
+    config_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '配置ID',
+    component_code VARCHAR(64) NOT NULL UNIQUE COMMENT '加载组件编码（外键，一对一关系）',
+    
+    -- 数据源信息
+    data_source_id VARCHAR(64) NOT NULL COMMENT '数据源ID（外键）',
+    schema_name VARCHAR(128) COMMENT '数据库schema名称',
+    table_name VARCHAR(128) NOT NULL COMMENT '目标表名',
+    
+    -- 加载操作
+    load_operation VARCHAR(32) NOT NULL COMMENT '加载操作：INSERT-插入、UPDATE-更新、UPSERT-插入或更新、DELETE-删除',
+    
+    -- 批量配置
+    batch_size INT DEFAULT 1000 COMMENT '批量大小',
+    batch_timeout INT DEFAULT 30 COMMENT '批量超时时间（秒）',
+    
+    -- 错误处理
+    error_strategy VARCHAR(32) DEFAULT 'FAIL' COMMENT '错误策略：FAIL-失败终止、SKIP-跳过错误行、CONTINUE-记录错误继续',
+    max_error_count INT DEFAULT 0 COMMENT '最大允许错误数（0表示不允许错误）',
+    
+    -- 性能优化
+    enable_transaction TINYINT DEFAULT 1 COMMENT '是否启用事务：0-否 1-是',
+    parallel_degree INT DEFAULT 1 COMMENT '并行度（多线程加载）',
+    
+    -- 状态
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    FOREIGN KEY (component_code) REFERENCES load_component_basic_info(component_code) ON DELETE CASCADE,
+    INDEX idx_component_code (component_code),
+    INDEX idx_data_source (data_source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='加载数据库配置主表';
+
+-- 2. 加载字段配置表
+CREATE TABLE load_field_config (
+    field_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '字段ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    -- 字段映射
+    source_field VARCHAR(128) NOT NULL COMMENT '源字段名（来自上游组件）',
+    target_field VARCHAR(128) NOT NULL COMMENT '目标字段名（数据库表字段）',
+    
+    -- 字段属性
+    is_primary_key TINYINT DEFAULT 0 COMMENT '是否主键：0-否 1-是（用于UPDATE/UPSERT的WHERE条件）',
+    is_update_field TINYINT DEFAULT 1 COMMENT '是否更新字段：0-否 1-是（UPSERT时是否更新此字段）',
+    
+    -- 字段转换（可选）
+    transform_expression TEXT COMMENT '字段转换表达式（如：UPPER(?)、TO_DATE(?)等）',
+    default_value VARCHAR(255) COMMENT '默认值（当源字段为空时使用）',
+    
+    -- 顺序
+    field_order INT NOT NULL COMMENT '字段顺序',
+    
+    -- 状态
+    enabled TINYINT DEFAULT 1 COMMENT '是否启用：0-禁用 1-启用',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (config_id) REFERENCES load_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_field_order (config_id, field_order),
+    INDEX idx_primary_key (config_id, is_primary_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='加载字段配置表';
+
+-- 3. 加载过滤条件表
+CREATE TABLE load_filter_condition (
+    condition_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '条件ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    -- 字段信息
+    source_field VARCHAR(128) NOT NULL COMMENT '源字段名',
+    target_field VARCHAR(128) COMMENT '目标字段名（用于生成WHERE子句）',
+    
+    -- 条件
+    operator VARCHAR(16) NOT NULL COMMENT '运算符：=、!=、>、<、>=、<=、LIKE、IN、IS NULL、IS NOT NULL',
+    value_content TEXT COMMENT '比较值（可为空，从字段获取）',
+    
+    -- 字段来源
+    field_origin TINYINT NOT NULL COMMENT '字段来源：0-固定值、1-上游组件结果集、2-系统变量（如当前时间）',
+    
+    -- 逻辑运算
+    logical_operator VARCHAR(8) DEFAULT 'AND' COMMENT '逻辑运算符：AND、OR',
+    
+    -- 顺序
+    condition_order INT NOT NULL COMMENT '条件顺序',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (config_id) REFERENCES load_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_condition_order (config_id, condition_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='加载过滤条件表';
+
+-- 4. 检查条件表（UPSERT乐观锁）
+CREATE TABLE load_check_condition (
+    check_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '检查ID',
+    config_id BIGINT NOT NULL COMMENT '配置ID（外键）',
+    
+    -- 检查字段
+    field_name VARCHAR(128) NOT NULL COMMENT '目标表字段名（如：version、update_time）',
+    
+    -- 引用字段
+    reference_field_name VARCHAR(128) NOT NULL COMMENT '引用字段名（从上游数据集获取期望值）',
+    
+    -- 比较运算符
+    operator VARCHAR(16) NOT NULL COMMENT '运算符：=、!=、>、<、>=、<=',
+    
+    -- 失败策略
+    failure_strategy VARCHAR(32) DEFAULT 'SKIP' COMMENT '检查失败策略：SKIP-跳过、FAIL-失败、RETRY-重试',
+    
+    -- 顺序
+    check_order INT NOT NULL COMMENT '检查顺序',
+    
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    FOREIGN KEY (config_id) REFERENCES load_db_config(config_id) ON DELETE CASCADE,
+    INDEX idx_config_id (config_id),
+    INDEX idx_check_order (config_id, check_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='检查条件表（UPSERT乐观锁）';
+
+-- =====================================================
+-- 示例数据
+-- =====================================================
+
+-- 示例1：简单INSERT操作
+INSERT INTO load_component_basic_info (component_code, name, data_source_type, load_mode, status)
+VALUES ('LOAD_USER', '加载用户数据', 'DB', 'INSERT', 1);
+
+INSERT INTO load_db_config (component_code, data_source_id, table_name, load_operation, batch_size)
+VALUES ('LOAD_USER', 'DS_HIVE_001', 'dw_users', 'INSERT', 1000);
+
+SET @config_id = LAST_INSERT_ID();
+
+-- 字段配置
+INSERT INTO load_field_config (config_id, source_field, target_field, field_order) VALUES
+(@config_id, 'id', 'user_id', 1),
+(@config_id, 'username', 'user_name', 2),
+(@config_id, 'email', 'user_email', 3),
+(@config_id, 'created_at', 'create_time', 4);
+
+-- 示例2：带过滤条件的INSERT
+INSERT INTO load_component_basic_info (component_code, name, data_source_type, load_mode, status)
+VALUES ('LOAD_ACTIVE_USER', '加载活跃用户', 'DB', 'INSERT', 1);
+
+INSERT INTO load_db_config (component_code, data_source_id, table_name, load_operation, batch_size)
+VALUES ('LOAD_ACTIVE_USER', 'DS_HIVE_001', 'dw_active_users', 'INSERT', 500);
+
+SET @config_id2 = LAST_INSERT_ID();
+
+-- 字段配置
+INSERT INTO load_field_config (config_id, source_field, target_field, field_order) VALUES
+(@config_id2, 'user_id', 'user_id', 1),
+(@config_id2, 'username', 'user_name', 2),
+(@config_id2, 'login_count', 'login_count', 3);
+
+-- 过滤条件：只加载登录次数>10的用户
+INSERT INTO load_filter_condition (config_id, source_field, operator, value_content, field_origin, logical_operator, condition_order) VALUES
+(@config_id2, 'status', '=', '"ACTIVE"', 0, 'AND', 1),
+(@config_id2, 'login_count', '>', '10', 0, 'AND', 2);
+
+-- 示例3：UPSERT操作（带乐观锁）
+INSERT INTO load_component_basic_info (component_code, name, data_source_type, load_mode, status)
+VALUES ('LOAD_ORDER_UPSERT', 'UPSERT订单数据', 'DB', 'UPSERT', 1);
+
+INSERT INTO load_db_config (component_code, data_source_id, table_name, load_operation, batch_size)
+VALUES ('LOAD_ORDER_UPSERT', 'DS_MYSQL_001', 'orders', 'UPSERT', 100);
+
+SET @config_id3 = LAST_INSERT_ID();
+
+-- 字段配置（注意主键和更新字段的标记）
+INSERT INTO load_field_config (config_id, source_field, target_field, is_primary_key, is_update_field, field_order) VALUES
+(@config_id3, 'order_id', 'order_id', 1, 0, 1),  -- 主键，不更新
+(@config_id3, 'user_id', 'user_id', 0, 0, 2),    -- 非主键，不更新（防止误改）
+(@config_id3, 'amount', 'amount', 0, 1, 3),      -- 非主键，可更新
+(@config_id3, 'status', 'status', 0, 1, 4),      -- 非主键，可更新
+(@config_id3, 'version', 'version', 0, 1, 5),    -- 版本号，可更新
+(@config_id3, 'update_time', 'update_time', 0, 1, 6); -- 更新时间，可更新
+
+-- 检查条件（乐观锁：version必须匹配）
+INSERT INTO load_check_condition (config_id, field_name, reference_field_name, operator, failure_strategy, check_order) VALUES
+(@config_id3, 'version', 'old_version', '=', 'SKIP', 1);
+
+-- 示例4：UPDATE操作（根据主键更新）
+INSERT INTO load_component_basic_info (component_code, name, data_source_type, load_mode, status)
+VALUES ('LOAD_USER_STATUS', '更新用户状态', 'DB', 'UPDATE', 1);
+
+INSERT INTO load_db_config (component_code, data_source_id, table_name, load_operation)
+VALUES ('LOAD_USER_STATUS', 'DS_MYSQL_001', 'users', 'UPDATE');
+
+SET @config_id4 = LAST_INSERT_ID();
+
+-- 字段配置
+INSERT INTO load_field_config (config_id, source_field, target_field, is_primary_key, is_update_field, field_order) VALUES
+(@config_id4, 'user_id', 'id', 1, 0, 1),         -- 主键（WHERE条件）
+(@config_id4, 'new_status', 'status', 0, 1, 2),  -- 更新字段
+(@config_id4, 'new_level', 'vip_level', 0, 1, 3); -- 更新字段
+
+-- 示例5：DELETE操作（根据条件删除）
+INSERT INTO load_component_basic_info (component_code, name, data_source_type, load_mode, status)
+VALUES ('LOAD_DELETE_OLD', '删除过期数据', 'DB', 'DELETE', 1);
+
+INSERT INTO load_db_config (component_code, data_source_id, table_name, load_operation)
+VALUES ('LOAD_DELETE_OLD', 'DS_MYSQL_001', 'temp_data', 'DELETE');
+
+SET @config_id5 = LAST_INSERT_ID();
+
+-- 字段配置（DELETE只需要WHERE条件字段）
+INSERT INTO load_field_config (config_id, source_field, target_field, is_primary_key, field_order) VALUES
+(@config_id5, 'data_id', 'id', 1, 1);
+
+-- 过滤条件：只删除过期的数据
+INSERT INTO load_filter_condition (config_id, source_field, target_field, operator, field_origin, logical_operator, condition_order) VALUES
+(@config_id5, 'expire_date', 'expire_date', '<', 1, 'AND', 1);
+
+-- =====================================================
+-- 查询示例
+-- =====================================================
+
+-- 查询1：获取加载配置的完整信息
+SELECT 
+    ldc.component_code,
+    ldc.table_name,
+    ldc.load_operation,
+    ldc.batch_size,
+    COUNT(DISTINCT lfc.field_id) as field_count,
+    COUNT(DISTINCT lfc2.condition_id) as filter_count,
+    COUNT(DISTINCT lcc.check_id) as check_count
+FROM load_db_config ldc
+LEFT JOIN load_field_config lfc ON ldc.config_id = lfc.config_id
+LEFT JOIN load_filter_condition lfc2 ON ldc.config_id = lfc2.config_id
+LEFT JOIN load_check_condition lcc ON ldc.config_id = lcc.config_id
+WHERE ldc.component_code = 'LOAD_ORDER_UPSERT'
+GROUP BY ldc.config_id;
+
+-- 查询2：生成INSERT语句模板
+SELECT 
+    CONCAT(
+        'INSERT INTO ', ldc.table_name, ' (',
+        GROUP_CONCAT(lfc.target_field ORDER BY lfc.field_order SEPARATOR ', '),
+        ') VALUES (',
+        GROUP_CONCAT('?' ORDER BY lfc.field_order SEPARATOR ', '),
+        ')'
+    ) as insert_sql
+FROM load_db_config ldc
+JOIN load_field_config lfc ON ldc.config_id = lfc.config_id AND lfc.enabled = 1
+WHERE ldc.component_code = 'LOAD_USER'
+GROUP BY ldc.config_id;
+
+-- 查询3：生成UPSERT语句模板（MySQL）
+SELECT 
+    CONCAT(
+        'INSERT INTO ', ldc.table_name, ' (',
+        GROUP_CONCAT(lfc.target_field ORDER BY lfc.field_order SEPARATOR ', '),
+        ') VALUES (',
+        GROUP_CONCAT('?' ORDER BY lfc.field_order SEPARATOR ', '),
+        ') ON DUPLICATE KEY UPDATE ',
+        GROUP_CONCAT(
+            CASE WHEN lfc.is_update_field = 1 AND lfc.is_primary_key = 0
+            THEN CONCAT(lfc.target_field, ' = VALUES(', lfc.target_field, ')')
+            ELSE NULL END
+            ORDER BY lfc.field_order
+            SEPARATOR ', '
+        )
+    ) as upsert_sql
+FROM load_db_config ldc
+JOIN load_field_config lfc ON ldc.config_id = lfc.config_id AND lfc.enabled = 1
+WHERE ldc.component_code = 'LOAD_ORDER_UPSERT'
+  AND ldc.load_operation = 'UPSERT'
+GROUP BY ldc.config_id;
+
+-- 查询4：生成UPDATE语句模板
+SELECT 
+    CONCAT(
+        'UPDATE ', ldc.table_name, ' SET ',
+        GROUP_CONCAT(
+            CASE WHEN lfc.is_update_field = 1 AND lfc.is_primary_key = 0
+            THEN CONCAT(lfc.target_field, ' = ?')
+            ELSE NULL END
+            ORDER BY lfc.field_order
+            SEPARATOR ', '
+        ),
+        ' WHERE ',
+        GROUP_CONCAT(
+            CASE WHEN lfc.is_primary_key = 1
+            THEN CONCAT(lfc.target_field, ' = ?')
+            ELSE NULL END
+            SEPARATOR ' AND '
+        )
+    ) as update_sql
+FROM load_db_config ldc
+JOIN load_field_config lfc ON ldc.config_id = lfc.config_id AND lfc.enabled = 1
+WHERE ldc.component_code = 'LOAD_USER_STATUS'
+  AND ldc.load_operation = 'UPDATE'
+GROUP BY ldc.config_id;
+
+-- 查询5：生成DELETE语句模板
+SELECT 
+    CONCAT(
+        'DELETE FROM ', ldc.table_name,
+        ' WHERE ',
+        GROUP_CONCAT(
+            CONCAT(lfc.target_field, ' ', lfc2.operator, ' ?')
+            ORDER BY lfc2.condition_order
+            SEPARATOR CONCAT(' ', lfc2.logical_operator, ' ')
+        )
+    ) as delete_sql
+FROM load_db_config ldc
+LEFT JOIN load_field_config lfc ON ldc.config_id = lfc.config_id AND lfc.is_primary_key = 1
+LEFT JOIN load_filter_condition lfc2 ON ldc.config_id = lfc2.config_id
+WHERE ldc.component_code = 'LOAD_DELETE_OLD'
+  AND ldc.load_operation = 'DELETE'
+GROUP BY ldc.config_id;
+
+-- 查询6：查询UPSERT的乐观锁检查条件
+SELECT 
+    lcc.field_name as db_field,
+    lcc.reference_field_name as source_field,
+    lcc.operator,
+    lcc.failure_strategy
+FROM load_check_condition lcc
+JOIN load_db_config ldc ON lcc.config_id = ldc.config_id
+WHERE ldc.component_code = 'LOAD_ORDER_UPSERT'
+ORDER BY lcc.check_order;
+
+-- 查询7：获取字段映射关系
+SELECT 
+    lfc.source_field,
+    lfc.target_field,
+    lfc.is_primary_key,
+    lfc.is_update_field,
+    lfc.transform_expression,
+    CASE 
+        WHEN lfc.is_primary_key = 1 THEN '主键字段（WHERE条件）'
+        WHEN lfc.is_update_field = 1 THEN '更新字段'
+        ELSE '只读字段'
+    END as field_usage
+FROM load_field_config lfc
+JOIN load_db_config ldc ON lfc.config_id = ldc.config_id
+WHERE ldc.component_code = 'LOAD_ORDER_UPSERT'
+  AND lfc.enabled = 1
+ORDER BY lfc.field_order;
+
