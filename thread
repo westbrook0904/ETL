@@ -1,0 +1,1358 @@
+管理 ThreadPoolTaskExecutor 的关键要点
+保存 Future 对象 - 提交任务时返回的 Future 可以用来取消任务
+使用可中断的任务 - 任务内部需要检查中断标志
+任务状态跟踪 - 维护任务的执行状态
+优雅关闭 - 正确关闭线程池
+让我为你创建一个完整的任务管理器示例：
+TaskManager.java(new)
+package com.dataloader.task;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.PreDestroy;
+import java.util.Map;
+import java.util.concurrent.*;
+
+/**
+ * 任务管理器 - 管理 ThreadPoolTaskExecutor 中的任务
+ * 支持任务的启动、停止、状态查询等功能
+ */
+@Component
+public class TaskManager {
+    
+    private static final Logger logger = LoggerFactory.getLogger(TaskManager.class);
+    
+    private final ThreadPoolTaskExecutor taskExecutor;
+    
+    // 保存任务ID和对应的Future对象，用于控制任务
+    private final Map<String, Future<?>> taskFutures = new ConcurrentHashMap<>();
+    
+    // 保存任务的状态信息
+    private final Map<String, TaskInfo> taskInfoMap = new ConcurrentHashMap<>();
+    
+    public TaskManager() {
+        this.taskExecutor = createTaskExecutor();
+    }
+    
+    /**
+     * 创建和配置线程池
+     */
+    private ThreadPoolTaskExecutor createTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        
+        // 核心线程数
+        executor.setCorePoolSize(5);
+        
+        // 最大线程数
+        executor.setMaxPoolSize(10);
+        
+        // 队列容量
+        executor.setQueueCapacity(100);
+        
+        // 线程名称前缀
+        executor.setThreadNamePrefix("ETL-Task-");
+        
+        // 拒绝策略：由调用线程执行
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        
+        // 线程空闲时间（秒）
+        executor.setKeepAliveSeconds(60);
+        
+        // 允许核心线程超时
+        executor.setAllowCoreThreadTimeOut(true);
+        
+        // 等待所有任务完成后再关闭线程池
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        
+        // 等待时间（秒）
+        executor.setAwaitTerminationSeconds(60);
+        
+        // 初始化
+        executor.initialize();
+        
+        logger.info("线程池初始化完成: corePoolSize={}, maxPoolSize={}, queueCapacity={}", 
+                    executor.getCorePoolSize(), executor.getMaxPoolSize(), executor.getQueueCapacity());
+        
+        return executor;
+    }
+    
+    /**
+     * 提交一个任务
+     * @param taskId 任务ID（唯一标识）
+     * @param task 任务对象
+     * @return 是否提交成功
+     */
+    public boolean submitTask(String taskId, Runnable task) {
+        if (taskFutures.containsKey(taskId)) {
+            logger.warn("任务已存在: {}", taskId);
+            return false;
+        }
+        
+        try {
+            // 包装任务，添加状态管理
+            ManagedTask managedTask = new ManagedTask(taskId, task);
+            
+            // 提交任务并保存Future
+            Future<?> future = taskExecutor.submit(managedTask);
+            taskFutures.put(taskId, future);
+            
+            // 记录任务信息
+            TaskInfo taskInfo = new TaskInfo(taskId, TaskStatus.RUNNING);
+            taskInfoMap.put(taskId, taskInfo);
+            
+            logger.info("任务已提交: taskId={}, 当前活跃任务数={}", taskId, taskExecutor.getActiveCount());
+            return true;
+            
+        } catch (Exception e) {
+            logger.error("提交任务失败: taskId={}", taskId, e);
+            return false;
+        }
+    }
+    
+    /**
+     * 提交一个Callable任务（可以返回结果）
+     */
+    public <T> Future<T> submitTask(String taskId, Callable<T> task) {
+        if (taskFutures.containsKey(taskId)) {
+            logger.warn("任务已存在: {}", taskId);
+            return null;
+        }
+        
+        try {
+            // 包装任务
+            ManagedCallableTask<T> managedTask = new ManagedCallableTask<>(taskId, task);
+            
+            // 提交任务
+            Future<T> future = taskExecutor.submit(managedTask);
+            taskFutures.put(taskId, future);
+            
+            // 记录任务信息
+            TaskInfo taskInfo = new TaskInfo(taskId, TaskStatus.RUNNING);
+            taskInfoMap.put(taskId, taskInfo);
+            
+            logger.info("Callable任务已提交: taskId={}", taskId);
+            return future;
+            
+        } catch (Exception e) {
+            logger.error("提交Callable任务失败: taskId={}", taskId, e);
+            return null;
+        }
+    }
+    
+    /**
+     * 停止指定任务
+     * @param taskId 任务ID
+     * @param mayInterruptIfRunning 是否中断正在运行的任务
+     * @return 是否成功停止
+     */
+    public boolean stopTask(String taskId, boolean mayInterruptIfRunning) {
+        Future<?> future = taskFutures.get(taskId);
+        
+        if (future == null) {
+            logger.warn("任务不存在: {}", taskId);
+            return false;
+        }
+        
+        if (future.isDone()) {
+            logger.info("任务已完成，无需停止: {}", taskId);
+            taskFutures.remove(taskId);
+            updateTaskStatus(taskId, TaskStatus.COMPLETED);
+            return true;
+        }
+        
+        try {
+            // 取消任务
+            boolean cancelled = future.cancel(mayInterruptIfRunning);
+            
+            if (cancelled) {
+                logger.info("任务已停止: taskId={}, interrupt={}", taskId, mayInterruptIfRunning);
+                taskFutures.remove(taskId);
+                updateTaskStatus(taskId, TaskStatus.CANCELLED);
+            } else {
+                logger.warn("任务停止失败: {}", taskId);
+            }
+            
+            return cancelled;
+            
+        } catch (Exception e) {
+            logger.error("停止任务异常: taskId={}", taskId, e);
+            return false;
+        }
+    }
+    
+    /**
+     * 停止所有任务
+     */
+    public void stopAllTasks(boolean mayInterruptIfRunning) {
+        logger.info("开始停止所有任务, 当前任务数: {}", taskFutures.size());
+        
+        taskFutures.keySet().forEach(taskId -> stopTask(taskId, mayInterruptIfRunning));
+        
+        logger.info("所有任务已停止");
+    }
+    
+    /**
+     * 获取任务状态
+     */
+    public TaskStatus getTaskStatus(String taskId) {
+        TaskInfo taskInfo = taskInfoMap.get(taskId);
+        
+        if (taskInfo == null) {
+            return TaskStatus.NOT_FOUND;
+        }
+        
+        Future<?> future = taskFutures.get(taskId);
+        
+        if (future == null) {
+            return taskInfo.getStatus();
+        }
+        
+        if (future.isDone()) {
+            if (future.isCancelled()) {
+                updateTaskStatus(taskId, TaskStatus.CANCELLED);
+            } else {
+                updateTaskStatus(taskId, TaskStatus.COMPLETED);
+            }
+        }
+        
+        return taskInfo.getStatus();
+    }
+    
+    /**
+     * 获取任务信息
+     */
+    public TaskInfo getTaskInfo(String taskId) {
+        TaskInfo taskInfo = taskInfoMap.get(taskId);
+        if (taskInfo != null) {
+            // 更新状态
+            getTaskStatus(taskId);
+        }
+        return taskInfo;
+    }
+    
+    /**
+     * 获取所有任务信息
+     */
+    public Map<String, TaskInfo> getAllTaskInfo() {
+        // 更新所有任务的状态
+        taskInfoMap.keySet().forEach(this::getTaskStatus);
+        return new ConcurrentHashMap<>(taskInfoMap);
+    }
+    
+    /**
+     * 获取线程池状态
+     */
+    public ThreadPoolStatus getThreadPoolStatus() {
+        ThreadPoolExecutor executor = taskExecutor.getThreadPoolExecutor();
+        
+        return new ThreadPoolStatus(
+            executor.getPoolSize(),           // 当前线程池大小
+            executor.getActiveCount(),        // 活跃线程数
+            executor.getCompletedTaskCount(), // 已完成任务数
+            executor.getTaskCount(),          // 总任务数
+            executor.getQueue().size()        // 队列中等待的任务数
+        );
+    }
+    
+    /**
+     * 清理已完成的任务记录
+     */
+    public void cleanupCompletedTasks() {
+        taskFutures.entrySet().removeIf(entry -> {
+            Future<?> future = entry.getValue();
+            if (future.isDone()) {
+                String taskId = entry.getKey();
+                logger.debug("清理已完成任务: {}", taskId);
+                return true;
+            }
+            return false;
+        });
+    }
+    
+    /**
+     * 更新任务状态
+     */
+    private void updateTaskStatus(String taskId, TaskStatus status) {
+        TaskInfo taskInfo = taskInfoMap.get(taskId);
+        if (taskInfo != null) {
+            taskInfo.setStatus(status);
+            if (status == TaskStatus.COMPLETED || status == TaskStatus.CANCELLED || status == TaskStatus.FAILED) {
+                taskInfo.setEndTime(System.currentTimeMillis());
+            }
+        }
+    }
+    
+    /**
+     * 应用关闭时优雅关闭线程池
+     */
+    @PreDestroy
+    public void shutdown() {
+        logger.info("开始关闭线程池...");
+        
+        try {
+            // 停止所有任务
+            stopAllTasks(true);
+            
+            // 关闭线程池
+            taskExecutor.shutdown();
+            
+            // 等待任务完成
+            if (!taskExecutor.getThreadPoolExecutor().awaitTermination(60, TimeUnit.SECONDS)) {
+                logger.warn("线程池未在指定时间内完成，强制关闭");
+                taskExecutor.getThreadPoolExecutor().shutdownNow();
+            }
+            
+            logger.info("线程池已关闭");
+            
+        } catch (InterruptedException e) {
+            logger.error("关闭线程池被中断", e);
+            taskExecutor.getThreadPoolExecutor().shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+    
+    /**
+     * 包装的任务类，支持状态管理和中断检查
+     */
+    private class ManagedTask implements Runnable {
+        private final String taskId;
+        private final Runnable task;
+        
+        public ManagedTask(String taskId, Runnable task) {
+            this.taskId = taskId;
+            this.task = task;
+        }
+        
+        @Override
+        public void run() {
+            logger.info("任务开始执行: {}", taskId);
+            
+            try {
+                // 检查是否被中断
+                if (Thread.currentThread().isInterrupted()) {
+                    logger.info("任务启动前已被中断: {}", taskId);
+                    updateTaskStatus(taskId, TaskStatus.CANCELLED);
+                    return;
+                }
+                
+                // 执行任务
+                task.run();
+                
+                // 任务完成
+                logger.info("任务执行完成: {}", taskId);
+                updateTaskStatus(taskId, TaskStatus.COMPLETED);
+                
+            } catch (Exception e) {
+                logger.error("任务执行失败: {}", taskId, e);
+                updateTaskStatus(taskId, TaskStatus.FAILED);
+                
+                TaskInfo taskInfo = taskInfoMap.get(taskId);
+                if (taskInfo != null) {
+                    taskInfo.setErrorMessage(e.getMessage());
+                }
+                
+            } finally {
+                // 从futures中移除
+                taskFutures.remove(taskId);
+            }
+        }
+    }
+    
+    /**
+     * 包装的Callable任务
+     */
+    private class ManagedCallableTask<T> implements Callable<T> {
+        private final String taskId;
+        private final Callable<T> task;
+        
+        public ManagedCallableTask(String taskId, Callable<T> task) {
+            this.taskId = taskId;
+            this.task = task;
+        }
+        
+        @Override
+        public T call() throws Exception {
+            logger.info("Callable任务开始执行: {}", taskId);
+            
+            try {
+                if (Thread.currentThread().isInterrupted()) {
+                    logger.info("任务启动前已被中断: {}", taskId);
+                    updateTaskStatus(taskId, TaskStatus.CANCELLED);
+                    return null;
+                }
+                
+                T result = task.call();
+                
+                logger.info("Callable任务执行完成: {}", taskId);
+                updateTaskStatus(taskId, TaskStatus.COMPLETED);
+                
+                return result;
+                
+            } catch (Exception e) {
+                logger.error("Callable任务执行失败: {}", taskId, e);
+                updateTaskStatus(taskId, TaskStatus.FAILED);
+                
+                TaskInfo taskInfo = taskInfoMap.get(taskId);
+                if (taskInfo != null) {
+                    taskInfo.setErrorMessage(e.getMessage());
+                }
+                
+                throw e;
+                
+            } finally {
+                taskFutures.remove(taskId);
+            }
+        }
+    }
+}
+
+
+TaskInfo.java(new)
+package com.dataloader.task;
+
+/**
+ * 任务信息
+ */
+public class TaskInfo {
+    
+    private String taskId;
+    private TaskStatus status;
+    private long startTime;
+    private long endTime;
+    private String errorMessage;
+    
+    public TaskInfo(String taskId, TaskStatus status) {
+        this.taskId = taskId;
+        this.status = status;
+        this.startTime = System.currentTimeMillis();
+    }
+    
+    // Getters and Setters
+    
+    public String getTaskId() {
+        return taskId;
+    }
+    
+    public void setTaskId(String taskId) {
+        this.taskId = taskId;
+    }
+    
+    public TaskStatus getStatus() {
+        return status;
+    }
+    
+    public void setStatus(TaskStatus status) {
+        this.status = status;
+    }
+    
+    public long getStartTime() {
+        return startTime;
+    }
+    
+    public void setStartTime(long startTime) {
+        this.startTime = startTime;
+    }
+    
+    public long getEndTime() {
+        return endTime;
+    }
+    
+    public void setEndTime(long endTime) {
+        this.endTime = endTime;
+    }
+    
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+    
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+    
+    /**
+     * 获取任务执行时长（毫秒）
+     */
+    public long getDuration() {
+        if (endTime > 0) {
+            return endTime - startTime;
+        }
+        return System.currentTimeMillis() - startTime;
+    }
+    
+    @Override
+    public String toString() {
+        return "TaskInfo{" +
+                "taskId='" + taskId + '\'' +
+                ", status=" + status +
+                ", startTime=" + startTime +
+                ", endTime=" + endTime +
+                ", duration=" + getDuration() + "ms" +
+                ", errorMessage='" + errorMessage + '\'' +
+                '}';
+    }
+}
+
+
+TaskStatus.java(new)
+package com.dataloader.task;
+
+/**
+ * 任务状态枚举
+ */
+public enum TaskStatus {
+    
+    /** 等待执行 */
+    PENDING("等待执行"),
+    
+    /** 正在运行 */
+    RUNNING("正在运行"),
+    
+    /** 已完成 */
+    COMPLETED("已完成"),
+    
+    /** 已取消 */
+    CANCELLED("已取消"),
+    
+    /** 执行失败 */
+    FAILED("执行失败"),
+    
+    /** 未找到 */
+    NOT_FOUND("未找到");
+    
+    private final String description;
+    
+    TaskStatus(String description) {
+        this.description = description;
+    }
+    
+    public String getDescription() {
+        return description;
+    }
+}
+ThreadPoolStatus.java(new)
+package com.dataloader.task;
+
+/**
+ * 线程池状态信息
+ */
+public class ThreadPoolStatus {
+    
+    /** 当前线程池大小 */
+    private int poolSize;
+    
+    /** 活跃线程数 */
+    private int activeCount;
+    
+    /** 已完成任务数 */
+    private long completedTaskCount;
+    
+    /** 总任务数 */
+    private long taskCount;
+    
+    /** 队列中等待的任务数 */
+    private int queueSize;
+    
+    public ThreadPoolStatus(int poolSize, int activeCount, long completedTaskCount, 
+                           long taskCount, int queueSize) {
+        this.poolSize = poolSize;
+        this.activeCount = activeCount;
+        this.completedTaskCount = completedTaskCount;
+        this.taskCount = taskCount;
+        this.queueSize = queueSize;
+    }
+    
+    // Getters
+    
+    public int getPoolSize() {
+        return poolSize;
+    }
+    
+    public int getActiveCount() {
+        return activeCount;
+    }
+    
+    public long getCompletedTaskCount() {
+        return completedTaskCount;
+    }
+    
+    public long getTaskCount() {
+        return taskCount;
+    }
+    
+    public int getQueueSize() {
+        return queueSize;
+    }
+    
+    /**
+     * 获取空闲线程数
+     */
+    public int getIdleCount() {
+        return poolSize - activeCount;
+    }
+    
+    /**
+     * 获取正在执行的任务数（活跃+队列）
+     */
+    public int getRunningTaskCount() {
+        return activeCount + queueSize;
+    }
+    
+    @Override
+    public String toString() {
+        return "ThreadPoolStatus{" +
+                "poolSize=" + poolSize +
+                ", activeCount=" + activeCount +
+                ", idleCount=" + getIdleCount() +
+                ", completedTaskCount=" + completedTaskCount +
+                ", taskCount=" + taskCount +
+                ", queueSize=" + queueSize +
+                '}';
+    }
+}
+
+
+TaskManagerExample.java(new)
++219
+现在让我创建一个REST控制器示例，展示如何在Web API中使用任务管理器：
+TaskController.java(new)
+package com.dataloader.controller;
+
+import com.dataloader.task.TaskInfo;
+import com.dataloader.task.TaskManager;
+import com.dataloader.task.TaskStatus;
+import com.dataloader.task.ThreadPoolStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * 任务管理控制器
+ * 提供任务的启动、停止、查询等REST API
+ */
+@RestController
+@RequestMapping("/api/tasks")
+public class TaskController {
+    
+    private static final Logger logger = LoggerFactory.getLogger(TaskController.class);
+    
+    @Autowired
+    private TaskManager taskManager;
+    
+    /**
+     * 启动一个ETL任务
+     * POST /api/tasks/start?taskId=xxx&pipelineCode=xxx
+     */
+    @PostMapping("/start")
+    public Map<String, Object> startTask(
+            @RequestParam String taskId,
+            @RequestParam String pipelineCode) {
+        
+        logger.info("接收启动任务请求: taskId={}, pipelineCode={}", taskId, pipelineCode);
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            // 创建ETL任务
+            Runnable etlTask = createEtlTask(pipelineCode);
+            
+            // 提交任务
+            boolean success = taskManager.submitTask(taskId, etlTask);
+            
+            if (success) {
+                response.put("success", true);
+                response.put("message", "任务启动成功");
+                response.put("taskId", taskId);
+                response.put("status", TaskStatus.RUNNING);
+            } else {
+                response.put("success", false);
+                response.put("message", "任务启动失败，可能任务已存在");
+            }
+            
+        } catch (Exception e) {
+            logger.error("启动任务失败", e);
+            response.put("success", false);
+            response.put("message", "启动任务异常: " + e.getMessage());
+        }
+        
+        return response;
+    }
+    
+    /**
+     * 停止一个任务
+     * POST /api/tasks/stop?taskId=xxx&interrupt=true
+     */
+    @PostMapping("/stop")
+    public Map<String, Object> stopTask(
+            @RequestParam String taskId,
+            @RequestParam(defaultValue = "true") boolean interrupt) {
+        
+        logger.info("接收停止任务请求: taskId={}, interrupt={}", taskId, interrupt);
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            boolean success = taskManager.stopTask(taskId, interrupt);
+            
+            if (success) {
+                response.put("success", true);
+                response.put("message", "任务停止成功");
+                response.put("taskId", taskId);
+            } else {
+                response.put("success", false);
+                response.put("message", "任务停止失败，可能任务不存在或已完成");
+            }
+            
+        } catch (Exception e) {
+            logger.error("停止任务失败", e);
+            response.put("success", false);
+            response.put("message", "停止任务异常: " + e.getMessage());
+        }
+        
+        return response;
+    }
+    
+    /**
+     * 停止所有任务
+     * POST /api/tasks/stopAll?interrupt=true
+     */
+    @PostMapping("/stopAll")
+    public Map<String, Object> stopAllTasks(
+            @RequestParam(defaultValue = "true") boolean interrupt) {
+        
+        logger.info("接收停止所有任务请求: interrupt={}", interrupt);
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            taskManager.stopAllTasks(interrupt);
+            
+            response.put("success", true);
+            response.put("message", "所有任务已停止");
+            
+        } catch (Exception e) {
+            logger.error("停止所有任务失败", e);
+            response.put("success", false);
+            response.put("message", "停止所有任务异常: " + e.getMessage());
+        }
+        
+        return response;
+    }
+    
+    /**
+     * 查询任务状态
+     * GET /api/tasks/status?taskId=xxx
+     */
+    @GetMapping("/status")
+    public Map<String, Object> getTaskStatus(@RequestParam String taskId) {
+        
+        logger.info("查询任务状态: taskId={}", taskId);
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        TaskStatus status = taskManager.getTaskStatus(taskId);
+        
+        if (status == TaskStatus.NOT_FOUND) {
+            response.put("success", false);
+            response.put("message", "任务不存在");
+        } else {
+            response.put("success", true);
+            response.put("taskId", taskId);
+            response.put("status", status);
+            response.put("statusDescription", status.getDescription());
+        }
+        
+        return response;
+    }
+    
+    /**
+     * 查询任务详细信息
+     * GET /api/tasks/info?taskId=xxx
+     */
+    @GetMapping("/info")
+    public Map<String, Object> getTaskInfo(@RequestParam String taskId) {
+        
+        logger.info("查询任务详细信息: taskId={}", taskId);
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        TaskInfo taskInfo = taskManager.getTaskInfo(taskId);
+        
+        if (taskInfo == null) {
+            response.put("success", false);
+            response.put("message", "任务不存在");
+        } else {
+            response.put("success", true);
+            response.put("taskInfo", taskInfo);
+        }
+        
+        return response;
+    }
+    
+    /**
+     * 查询所有任务
+     * GET /api/tasks/all
+     */
+    @GetMapping("/all")
+    public Map<String, Object> getAllTasks() {
+        
+        logger.info("查询所有任务");
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        Map<String, TaskInfo> allTasks = taskManager.getAllTaskInfo();
+        
+        response.put("success", true);
+        response.put("taskCount", allTasks.size());
+        response.put("tasks", allTasks);
+        
+        return response;
+    }
+    
+    /**
+     * 查询线程池状态
+     * GET /api/tasks/pool-status
+     */
+    @GetMapping("/pool-status")
+    public Map<String, Object> getPoolStatus() {
+        
+        logger.info("查询线程池状态");
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        ThreadPoolStatus poolStatus = taskManager.getThreadPoolStatus();
+        
+        response.put("success", true);
+        response.put("poolStatus", poolStatus);
+        
+        return response;
+    }
+    
+    /**
+     * 清理已完成的任务
+     * POST /api/tasks/cleanup
+     */
+    @PostMapping("/cleanup")
+    public Map<String, Object> cleanupCompletedTasks() {
+        
+        logger.info("清理已完成的任务");
+        
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            int beforeCount = taskManager.getAllTaskInfo().size();
+            taskManager.cleanupCompletedTasks();
+            int afterCount = taskManager.getAllTaskInfo().size();
+            
+            response.put("success", true);
+            response.put("message", "清理完成");
+            response.put("cleanedCount", beforeCount - afterCount);
+            response.put("remainingCount", afterCount);
+            
+        } catch (Exception e) {
+            logger.error("清理任务失败", e);
+            response.put("success", false);
+            response.put("message", "清理任务异常: " + e.getMessage());
+        }
+        
+        return response;
+    }
+    
+    /**
+     * 创建一个模拟的ETL任务
+     */
+    private Runnable createEtlTask(String pipelineCode) {
+        return () -> {
+            logger.info("[{}] ETL任务开始执行", pipelineCode);
+            
+            try {
+                // 阶段1: 数据抽取
+                logger.info("[{}] 阶段1: 数据抽取...", pipelineCode);
+                for (int i = 0; i < 5; i++) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        logger.info("[{}] 数据抽取被中断", pipelineCode);
+                        return;
+                    }
+                    Thread.sleep(1000);
+                    logger.info("[{}] 数据抽取进度: {}%", pipelineCode, (i + 1) * 20);
+                }
+                logger.info("[{}] 数据抽取完成", pipelineCode);
+                
+                // 阶段2: 数据转换
+                logger.info("[{}] 阶段2: 数据转换...", pipelineCode);
+                for (int i = 0; i < 5; i++) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        logger.info("[{}] 数据转换被中断", pipelineCode);
+                        return;
+                    }
+                    Thread.sleep(1000);
+                    logger.info("[{}] 数据转换进度: {}%", pipelineCode, (i + 1) * 20);
+                }
+                logger.info("[{}] 数据转换完成", pipelineCode);
+                
+                // 阶段3: 数据加载
+                logger.info("[{}] 阶段3: 数据加载...", pipelineCode);
+                for (int i = 0; i < 5; i++) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        logger.info("[{}] 数据加载被中断", pipelineCode);
+                        return;
+                    }
+                    Thread.sleep(1000);
+                    logger.info("[{}] 数据加载进度: {}%", pipelineCode, (i + 1) * 20);
+                }
+                logger.info("[{}] 数据加载完成", pipelineCode);
+                
+                logger.info("[{}] ETL任务执行完成", pipelineCode);
+                
+            } catch (InterruptedException e) {
+                logger.info("[{}] ETL任务被中断", pipelineCode);
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                logger.error("[{}] ETL任务执行失败", pipelineCode, e);
+                throw new RuntimeException("ETL任务执行失败", e);
+            }
+        };
+    }
+}
+
+
+README.md(new)
+# ThreadPoolTaskExecutor 任务管理系统
+
+## 📋 概述
+
+这是一个完整的 `ThreadPoolTaskExecutor` 任务管理解决方案，提供了任务的启动、停止、监控等功能。
+
+## 🎯 核心功能
+
+### 1. 任务提交与管理
+- ✅ 提交 Runnable 任务
+- ✅ 提交 Callable 任务（带返回值）
+- ✅ 任务唯一标识（taskId）
+- ✅ 任务状态跟踪
+
+### 2. 任务控制
+- ✅ 停止指定任务
+- ✅ 停止所有任务
+- ✅ 可中断/不可中断停止
+- ✅ 优雅关闭线程池
+
+### 3. 状态监控
+- ✅ 查询任务状态
+- ✅ 查询任务详细信息
+- ✅ 查询所有任务
+- ✅ 查询线程池状态
+- ✅ 清理已完成任务
+
+## 🏗️ 架构设计
+
+### 核心类
+
+1. **TaskManager** - 任务管理器
+   - 管理 ThreadPoolTaskExecutor
+   - 维护任务 Future 映射
+   - 提供任务操作接口
+
+2. **TaskInfo** - 任务信息
+   - 任务ID
+   - 任务状态
+   - 开始/结束时间
+   - 错误信息
+
+3. **TaskStatus** - 任务状态枚举
+   - PENDING - 等待执行
+   - RUNNING - 正在运行
+   - COMPLETED - 已完成
+   - CANCELLED - 已取消
+   - FAILED - 执行失败
+
+4. **ThreadPoolStatus** - 线程池状态
+   - 线程池大小
+   - 活跃线程数
+   - 已完成任务数
+   - 队列大小
+
+## 💡 使用方法
+
+### 基础用法
+
+#### 1. 提交简单任务
+
+```java
+@Autowired
+private TaskManager taskManager;
+
+// 提交任务
+taskManager.submitTask("task-001", () -> {
+    System.out.println("执行任务...");
+    // 任务逻辑
+});
+```
+
+#### 2. 提交可中断的任务
+
+```java
+taskManager.submitTask("task-002", () -> {
+    for (int i = 0; i < 100; i++) {
+        // 检查中断标志
+        if (Thread.currentThread().isInterrupted()) {
+            System.out.println("任务被中断，提前退出");
+            return;
+        }
+        
+        // 执行任务
+        processData(i);
+        
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            // 恢复中断状态
+            Thread.currentThread().interrupt();
+            return;
+        }
+    }
+});
+```
+
+#### 3. 提交 Callable 任务（带返回值）
+
+```java
+Future<String> future = taskManager.submitTask("task-003", () -> {
+    // 执行任务
+    String result = performCalculation();
+    return result;
+});
+
+// 获取结果
+try {
+    String result = future.get(); // 阻塞等待
+    System.out.println("任务结果: " + result);
+} catch (Exception e) {
+    e.printStackTrace();
+}
+```
+
+#### 4. 停止任务
+
+```java
+// 停止任务（中断）
+taskManager.stopTask("task-001", true);
+
+// 停止任务（不中断，等待当前操作完成）
+taskManager.stopTask("task-001", false);
+
+// 停止所有任务
+taskManager.stopAllTasks(true);
+```
+
+#### 5. 查询任务状态
+
+```java
+// 获取任务状态
+TaskStatus status = taskManager.getTaskStatus("task-001");
+System.out.println("任务状态: " + status);
+
+// 获取任务详细信息
+TaskInfo info = taskManager.getTaskInfo("task-001");
+System.out.println("任务信息: " + info);
+
+// 获取所有任务
+Map<String, TaskInfo> allTasks = taskManager.getAllTaskInfo();
+allTasks.forEach((id, task) -> {
+    System.out.println(id + " -> " + task.getStatus());
+});
+```
+
+#### 6. 查询线程池状态
+
+```java
+ThreadPoolStatus poolStatus = taskManager.getThreadPoolStatus();
+System.out.println("线程池大小: " + poolStatus.getPoolSize());
+System.out.println("活跃线程: " + poolStatus.getActiveCount());
+System.out.println("队列任务: " + poolStatus.getQueueSize());
+```
+
+### REST API 使用
+
+如果集成了 `TaskController`，可以通过 HTTP API 管理任务：
+
+#### 启动任务
+```bash
+POST /api/tasks/start?taskId=task-001&pipelineCode=PIPELINE_001
+```
+
+#### 停止任务
+```bash
+POST /api/tasks/stop?taskId=task-001&interrupt=true
+```
+
+#### 查询任务状态
+```bash
+GET /api/tasks/status?taskId=task-001
+```
+
+#### 查询所有任务
+```bash
+GET /api/tasks/all
+```
+
+#### 查询线程池状态
+```bash
+GET /api/tasks/pool-status
+```
+
+## 🔧 配置说明
+
+### 线程池参数
+
+在 `TaskManager` 中可以配置以下参数：
+
+```java
+executor.setCorePoolSize(5);              // 核心线程数
+executor.setMaxPoolSize(10);              // 最大线程数
+executor.setQueueCapacity(100);           // 队列容量
+executor.setKeepAliveSeconds(60);         // 线程空闲时间
+executor.setThreadNamePrefix("ETL-Task-"); // 线程名称前缀
+```
+
+### 拒绝策略
+
+支持以下拒绝策略：
+
+1. **CallerRunsPolicy** - 由调用线程执行（默认）
+2. **AbortPolicy** - 抛出异常
+3. **DiscardPolicy** - 丢弃任务
+4. **DiscardOldestPolicy** - 丢弃最旧的任务
+
+```java
+executor.setRejectedExecutionHandler(
+    new ThreadPoolExecutor.CallerRunsPolicy()
+);
+```
+
+## ⚠️ 最佳实践
+
+### 1. 任务设计
+
+**✅ 正确的做法：**
+
+```java
+taskManager.submitTask("task-001", () -> {
+    for (int i = 0; i < 1000; i++) {
+        // 定期检查中断标志
+        if (Thread.currentThread().isInterrupted()) {
+            cleanup();
+            return;
+        }
+        
+        processItem(i);
+        
+        // 可中断的等待
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            cleanup();
+            return;
+        }
+    }
+});
+```
+
+**❌ 错误的做法：**
+
+```java
+taskManager.submitTask("task-001", () -> {
+    // 从不检查中断标志
+    for (int i = 0; i < 1000; i++) {
+        processItem(i);
+        // 无法中断！
+    }
+});
+```
+
+### 2. 异常处理
+
+**✅ 正确的做法：**
+
+```java
+taskManager.submitTask("task-001", () -> {
+    try {
+        performTask();
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt(); // 恢复中断状态
+        cleanup();
+    } catch (Exception e) {
+        logger.error("任务执行失败", e);
+        // 适当的错误处理
+    }
+});
+```
+
+### 3. 资源清理
+
+```java
+taskManager.submitTask("task-001", () -> {
+    Connection conn = null;
+    try {
+        conn = getConnection();
+        processData(conn);
+    } finally {
+        // 确保资源被释放
+        if (conn != null) {
+            conn.close();
+        }
+    }
+});
+```
+
+### 4. 线程池大小设置
+
+- **CPU 密集型任务**: `线程数 = CPU核心数 + 1`
+- **IO 密集型任务**: `线程数 = CPU核心数 * 2 或更多`
+- **混合型任务**: 根据实际情况调整
+
+```java
+// 获取CPU核心数
+int processors = Runtime.getRuntime().availableProcessors();
+
+// CPU密集型
+executor.setCorePoolSize(processors + 1);
+
+// IO密集型
+executor.setCorePoolSize(processors * 2);
+```
+
+## 📊 监控建议
+
+### 1. 定期检查线程池状态
+
+```java
+@Scheduled(fixedRate = 60000) // 每分钟执行一次
+public void monitorThreadPool() {
+    ThreadPoolStatus status = taskManager.getThreadPoolStatus();
+    
+    logger.info("线程池监控 - " +
+        "池大小: {}, 活跃: {}, 队列: {}, 完成: {}",
+        status.getPoolSize(),
+        status.getActiveCount(),
+        status.getQueueSize(),
+        status.getCompletedTaskCount()
+    );
+    
+    // 告警逻辑
+    if (status.getQueueSize() > 80) {
+        logger.warn("队列任务过多，可能需要扩容");
+    }
+}
+```
+
+### 2. 清理已完成任务
+
+```java
+@Scheduled(cron = "0 0 * * * *") // 每小时执行
+public void cleanupTasks() {
+    taskManager.cleanupCompletedTasks();
+    logger.info("已清理完成的任务");
+}
+```
+
+## 🚀 ETL 场景应用示例
+
+### 管道任务执行
+
+```java
+public void executePipeline(String pipelineCode) {
+    String taskId = "pipeline-" + pipelineCode;
+    
+    taskManager.submitTask(taskId, () -> {
+        try {
+            // 1. 抽取阶段
+            if (Thread.currentThread().isInterrupted()) return;
+            List<Map> extractedData = extractData(pipelineCode);
+            logger.info("[{}] 抽取完成: {} 条", pipelineCode, extractedData.size());
+            
+            // 2. 转换阶段
+            if (Thread.currentThread().isInterrupted()) return;
+            List<Map> transformedData = transformData(extractedData);
+            logger.info("[{}] 转换完成", pipelineCode);
+            
+            // 3. 加载阶段
+            if (Thread.currentThread().isInterrupted()) return;
+            loadData(transformedData);
+            logger.info("[{}] 加载完成", pipelineCode);
+            
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.info("[{}] 管道被中断", pipelineCode);
+        } catch (Exception e) {
+            logger.error("[{}] 管道执行失败", pipelineCode, e);
+            throw new RuntimeException(e);
+        }
+    });
+}
+
+// 停止管道
+public void stopPipeline(String pipelineCode) {
+    String taskId = "pipeline-" + pipelineCode;
+    taskManager.stopTask(taskId, true);
+}
+```
+
+## 🔍 故障排查
+
+### 任务无法停止
+
+**原因**: 任务没有检查中断标志
+
+**解决**: 在任务中定期检查 `Thread.currentThread().isInterrupted()`
+
+### 线程池队列满
+
+**原因**: 任务提交速度 > 处理速度
+
+**解决**: 
+1. 增加线程数
+2. 增加队列容量
+3. 优化任务执行效率
+4. 使用合适的拒绝策略
+
+### 任务执行时间过长
+
+**原因**: 任务逻辑复杂或资源竞争
+
+**解决**:
+1. 优化任务逻辑
+2. 分解大任务为小任务
+3. 检查是否有死锁或资源阻塞
+
+## 📚 参考示例
+
+完整的使用示例请参考:
+- `TaskManagerExample.java` - 基础使用示例
+- `TaskController.java` - REST API 示例
+
+## 🙋 常见问题
+
+**Q: 如何确保任务可以被中断？**
+
+A: 在任务中定期检查中断标志，并在捕获 InterruptedException 后恢复中断状态。
+
+**Q: Future.cancel() 和 stopTask() 的区别？**
+
+A: `stopTask()` 内部调用 `Future.cancel()`，但同时会更新任务状态和清理资源。
+
+**Q: 如何获取任务的返回值？**
+
+A: 使用 `submitTask(taskId, Callable)` 提交任务，返回的 Future 可以获取结果。
+
+**Q: 线程池关闭后还能提交任务吗？**
+
+A: 不能。关闭后提交任务会抛出 RejectedExecutionException。
+
