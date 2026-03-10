@@ -1,0 +1,69 @@
+/**
+     * 智能批量UPSERT - 先查询判断是否存在，再决定插入或更新
+     * 这种方式适用于不支持ON DUPLICATE KEY UPDATE的数据库，或需要更精确控制的场景
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int smartBatchUpsert(LoaderConfig config, List<Map<String, Object>> batch) {
+        List<String> fields = extractFields(config);
+        List<String> primaryKeys = extractPrimaryKeys(config);
+        List<Map<String, Object>> paramsList = buildParametersList(config, batch);
+        
+        int totalAffected = 0;
+        
+        // 先批量查询出所有存在的记录
+        List<Map<String, Object>> existingRecords = dataLoaderMapper.batchSelectByPrimaryKeys(
+            config.getTableName(), 
+            primaryKeys, 
+            paramsList
+        );
+        
+        // 构建已存在记录的主键集合（用于快速判断）
+        Set<String> existingKeySet = new HashSet<>();
+        if (existingRecords != null) {
+            for (Map<String, Object> record : existingRecords) {
+                String keyComposite = buildCompositeKey(primaryKeys, record);
+                existingKeySet.add(keyComposite);
+            }
+        }
+        
+        // 分离出需要插入和更新的数据
+        List<Map<String, Object>> insertList = new ArrayList<>();
+        List<Map<String, Object>> updateList = new ArrayList<>();
+        
+        for (Map<String, Object> data : paramsList) {
+            String keyComposite = buildCompositeKey(primaryKeys, data);
+            if (existingKeySet.contains(keyComposite)) {
+                updateList.add(data);
+            } else {
+                insertList.add(data);
+            }
+        }
+
+      logger.info("智能UPSERT - 总数: {}, 需插入: {}, 需更新: {}", 
+                   paramsList.size(), insertList.size(), updateList.size());
+        
+        // 执行插入
+        if (!insertList.isEmpty()) {
+            int inserted = dataLoaderMapper.batchInsertWithKeys(
+                config.getTableName(), 
+                fields, 
+                insertList
+            );
+            logger.info("批量插入完成，影响行数: {}", inserted);
+            totalAffected += inserted;
+        }
+        
+        // 执行更新
+        if (!updateList.isEmpty()) {
+            int updated = dataLoaderMapper.batchUpdate(
+                config.getTableName(), 
+                fields, 
+                primaryKeys, 
+                updateList
+            );
+            logger.info("批量更新完成，影响行数: {}", updated);
+            totalAffected += updated;
+        }
+        
+        return totalAffected;
+    }
