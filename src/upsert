@@ -1,69 +1,449 @@
-/**
-     * 智能批量UPSERT - 先查询判断是否存在，再决定插入或更新
-     * 这种方式适用于不支持ON DUPLICATE KEY UPDATE的数据库，或需要更精确控制的场景
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public int smartBatchUpsert(LoaderConfig config, List<Map<String, Object>> batch) {
-        List<String> fields = extractFields(config);
-        List<String> primaryKeys = extractPrimaryKeys(config);
-        List<Map<String, Object>> paramsList = buildParametersList(config, batch);
-        
-        int totalAffected = 0;
-        
-        // 先批量查询出所有存在的记录
-        List<Map<String, Object>> existingRecords = dataLoaderMapper.batchSelectByPrimaryKeys(
-            config.getTableName(), 
-            primaryKeys, 
-            paramsList
-        );
-        
-        // 构建已存在记录的主键集合（用于快速判断）
-        Set<String> existingKeySet = new HashSet<>();
-        if (existingRecords != null) {
-            for (Map<String, Object> record : existingRecords) {
-                String keyComposite = buildCompositeKey(primaryKeys, record);
-                existingKeySet.add(keyComposite);
-            }
-        }
-        
-        // 分离出需要插入和更新的数据
-        List<Map<String, Object>> insertList = new ArrayList<>();
-        List<Map<String, Object>> updateList = new ArrayList<>();
-        
-        for (Map<String, Object> data : paramsList) {
-            String keyComposite = buildCompositeKey(primaryKeys, data);
-            if (existingKeySet.contains(keyComposite)) {
-                updateList.add(data);
-            } else {
-                insertList.add(data);
-            }
-        }
-
-      logger.info("智能UPSERT - 总数: {}, 需插入: {}, 需更新: {}", 
-                   paramsList.size(), insertList.size(), updateList.size());
-        
-        // 执行插入
-        if (!insertList.isEmpty()) {
-            int inserted = dataLoaderMapper.batchInsertWithKeys(
-                config.getTableName(), 
-                fields, 
-                insertList
-            );
-            logger.info("批量插入完成，影响行数: {}", inserted);
-            totalAffected += inserted;
-        }
-        
-        // 执行更新
-        if (!updateList.isEmpty()) {
-            int updated = dataLoaderMapper.batchUpdate(
-                config.getTableName(), 
-                fields, 
-                primaryKeys, 
-                updateList
-            );
-            logger.info("批量更新完成，影响行数: {}", updated);
-            totalAffected += updated;
-        }
-        
-        return totalAffected;
-    }
+openapi: 3.0.3
+info:
+  title: ETL Pipeline Configuration API
+  version: 1.0.0
+  description: ETL 数据管道配置查询接口
+paths:
+  /api/v1/pipelines/{pipelineId}:
+    get:
+      summary: 查询 ETL 管道配置（含有向图结构）
+      operationId: getPipelineConfig
+      tags:
+        - Pipeline
+      parameters:
+        - name: pipelineId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 管道唯一标识
+      responses:
+        '200':
+          description: 成功返回管道配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineVO'
+        '404':
+          description: 管道不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    # ─────────────────────────────────────────
+    # 管道顶层结构
+    # ─────────────────────────────────────────
+    PipelineVO:
+      type: object
+      required: [pipelineId, name, version, nodes, edges]
+      properties:
+        pipelineId:
+          type: string
+          example: pipe-001
+        name:
+          type: string
+          example: 订单数据同步
+        version:
+          type: integer
+          example: 3
+        description:
+          type: string
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeVO'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/EdgeVO'
+    # ─────────────────────────────────────────
+    # 边
+    # ─────────────────────────────────────────
+    EdgeVO:
+      type: object
+      required: [id, sourceNodeId, targetNodeId]
+      properties:
+        id:
+          type: string
+          example: edge-001
+        sourceNodeId:
+          type: string
+        targetNodeId:
+          type: string
+        label:
+          type: string
+          description: 边的描述标签，可选
+    # ─────────────────────────────────────────
+    # 节点（通用部分 + 多态 config）
+    # ─────────────────────────────────────────
+    NodeVO:
+      type: object
+      required: [id, type, subType, config]
+      properties:
+        id:
+          type: string
+          example: node-001
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/NodeType'
+        subType:
+          type: string
+          description: 组件子类型，与 type 共同确定 config 结构
+          example: DATABASE
+        position:
+          $ref: '#/components/schemas/Position'
+        status:
+          $ref: '#/components/schemas/NodeStatus'
+        config:
+          $ref: '#/components/schemas/NodeConfig'
+    NodeType:
+      type: string
+      enum: [EXTRACT, TRANSFORM, LOAD]
+      description: |
+        节点主类型：
+        - EXTRACT: 数据抽取
+        - TRANSFORM: 数据转换
+        - LOAD: 数据加载
+    NodeStatus:
+      type: string
+      enum: [ENABLED, DISABLED]
+    Position:
+      type: object
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+    # ─────────────────────────────────────────
+    # NodeConfig 多态定义（核心）
+    # ─────────────────────────────────────────
+    NodeConfig:
+      description: |
+        节点配置，根据节点的 subType 使用不同的 Schema。
+        subType 与 Schema 映射关系：
+        - DATABASE        → DatabaseExtractConfig
+        - MQ              → MqExtractConfig
+        - FILE            → FileExtractConfig
+        - HTTP_API        → HttpApiExtractConfig
+        - FIELD_MAPPING   → FieldMappingConfig
+        - FILTER          → FilterConfig
+        - AGGREGATION     → AggregationConfig
+        - CUSTOM_SCRIPT   → CustomScriptConfig
+        - DB_LOAD         → DatabaseLoadConfig
+        - ES_LOAD         → ElasticsearchLoadConfig
+        - MQ_LOAD         → MqLoadConfig
+      oneOf:
+        - $ref: '#/components/schemas/DatabaseExtractConfig'
+        - $ref: '#/components/schemas/MqExtractConfig'
+        - $ref: '#/components/schemas/FileExtractConfig'
+        - $ref: '#/components/schemas/HttpApiExtractConfig'
+        - $ref: '#/components/schemas/FieldMappingConfig'
+        - $ref: '#/components/schemas/FilterConfig'
+        - $ref: '#/components/schemas/AggregationConfig'
+        - $ref: '#/components/schemas/CustomScriptConfig'
+        - $ref: '#/components/schemas/DatabaseLoadConfig'
+        - $ref: '#/components/schemas/ElasticsearchLoadConfig'
+        - $ref: '#/components/schemas/MqLoadConfig'
+      # 注：discriminator 要求每个 oneOf schema 有同名字段，
+      # 如果你的 config 对象内不含 subType 可去掉此段，
+      # 改为依赖外层 NodeVO.subType 判断。
+      discriminator:
+        propertyName: subType
+        mapping:
+          DATABASE:      '#/components/schemas/DatabaseExtractConfig'
+          MQ:            '#/components/schemas/MqExtractConfig'
+          FILE:          '#/components/schemas/FileExtractConfig'
+          HTTP_API:      '#/components/schemas/HttpApiExtractConfig'
+          FIELD_MAPPING: '#/components/schemas/FieldMappingConfig'
+          FILTER:        '#/components/schemas/FilterConfig'
+          AGGREGATION:   '#/components/schemas/AggregationConfig'
+          CUSTOM_SCRIPT: '#/components/schemas/CustomScriptConfig'
+          DB_LOAD:       '#/components/schemas/DatabaseLoadConfig'
+          ES_LOAD:       '#/components/schemas/ElasticsearchLoadConfig'
+          MQ_LOAD:       '#/components/schemas/MqLoadConfig'
+    # ─────────────────────────────────────────
+    # EXTRACT 系列 config
+    # ─────────────────────────────────────────
+    DatabaseExtractConfig:
+      type: object
+      required: [datasourceId, table]
+      properties:
+        datasourceId:
+          type: string
+          description: 引用数据源 ID，不暴露连接凭证
+          example: ds-mysql-prod
+        schema:
+          type: string
+          example: order_db
+        table:
+          type: string
+          example: t_order
+        customQuery:
+          type: string
+          description: 自定义 SQL，与 table 二选一
+        fetchMode:
+          type: string
+          enum: [FULL, INCREMENTAL, CDC]
+          default: FULL
+        incrementalColumn:
+          type: string
+          description: 增量字段（fetchMode=INCREMENTAL 时必填）
+        splitColumn:
+          type: string
+          description: 并行分片字段
+        batchSize:
+          type: integer
+          default: 1000
+    MqExtractConfig:
+      type: object
+      required: [clusterId, topic]
+      properties:
+        clusterId:
+          type: string
+          example: kafka-cluster-01
+        topic:
+          type: string
+          example: payment.events
+        consumerGroup:
+          type: string
+        offsetReset:
+          type: string
+          enum: [EARLIEST, LATEST, NONE]
+          default: EARLIEST
+        deserializer:
+          type: string
+          enum: [JSON, AVRO, PROTOBUF, STRING]
+          default: JSON
+        maxPollRecords:
+          type: integer
+          default: 500
+    FileExtractConfig:
+      type: object
+      required: [storagePath, fileFormat]
+      properties:
+        storageId:
+          type: string
+          description: 引用存储配置 ID（OSS/HDFS/S3 等）
+        storagePath:
+          type: string
+          example: /data/input/orders/
+        fileFormat:
+          type: string
+          enum: [CSV, JSON, PARQUET, ORC, EXCEL]
+        encoding:
+          type: string
+          default: UTF-8
+        delimiter:
+          type: string
+          description: CSV 分隔符
+          default: ","
+        hasHeader:
+          type: boolean
+          default: true
+    HttpApiExtractConfig:
+      type: object
+      required: [url, method]
+      properties:
+        url:
+          type: string
+          example: https://api.example.com/orders
+        method:
+          type: string
+          enum: [GET, POST]
+          default: GET
+        authType:
+          type: string
+          enum: [NONE, BASIC, BEARER, API_KEY]
+          default: NONE
+        credentialId:
+          type: string
+          description: 引用凭证 ID，不暴露 token/密码
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        pagination:
+          $ref: '#/components/schemas/PaginationConfig'
+    PaginationConfig:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [PAGE_NUMBER, CURSOR, OFFSET]
+        pageParam:
+          type: string
+          example: page
+        pageSizeParam:
+          type: string
+          example: size
+        pageSize:
+          type: integer
+          default: 100
+    # ─────────────────────────────────────────
+    # TRANSFORM 系列 config
+    # ─────────────────────────────────────────
+    FieldMappingConfig:
+      type: object
+      required: [mappings]
+      properties:
+        mappings:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldMapping'
+        dropUnmapped:
+          type: boolean
+          default: false
+          description: 是否丢弃未映射的字段
+    FieldMapping:
+      type: object
+      required: [source, target]
+      properties:
+        source:
+          type: string
+          example: order_id
+        target:
+          type: string
+          example: orderId
+        transform:
+          type: string
+          nullable: true
+          enum: [UPPERCASE, LOWERCASE, TIMESTAMP_TO_ISO8601, NULL_TO_EMPTY]
+          description: 内置转换函数，null 表示直接映射
+    FilterConfig:
+      type: object
+      required: [conditions, logic]
+      properties:
+        logic:
+          type: string
+          enum: [AND, OR]
+          default: AND
+        conditions:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilterCondition'
+    FilterCondition:
+      type: object
+      required: [field, operator, value]
+      properties:
+        field:
+          type: string
+        operator:
+          type: string
+          enum: [EQ, NEQ, GT, GTE, LT, LTE, IN, NOT_IN, IS_NULL, IS_NOT_NULL, LIKE]
+        value:
+          description: 比较值，类型随字段类型而定
+    AggregationConfig:
+      type: object
+      required: [groupByFields, aggregations]
+      properties:
+        groupByFields:
+          type: array
+          items:
+            type: string
+        aggregations:
+          type: array
+          items:
+            $ref: '#/components/schemas/AggregationItem'
+    AggregationItem:
+      type: object
+      required: [field, function, alias]
+      properties:
+        field:
+          type: string
+        function:
+          type: string
+          enum: [COUNT, SUM, AVG, MAX, MIN, COUNT_DISTINCT]
+        alias:
+          type: string
+    CustomScriptConfig:
+      type: object
+      required: [language, script]
+      properties:
+        language:
+          type: string
+          enum: [GROOVY, PYTHON, SQL]
+        script:
+          type: string
+          description: 自定义脚本内容
+    # ─────────────────────────────────────────
+    # LOAD 系列 config
+    # ─────────────────────────────────────────
+    DatabaseLoadConfig:
+      type: object
+      required: [datasourceId, table, writeMode]
+      properties:
+        datasourceId:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        writeMode:
+          type: string
+          enum: [INSERT, UPSERT, OVERWRITE]
+          default: UPSERT
+        primaryKeys:
+          type: array
+          items:
+            type: string
+          description: UPSERT 模式下的主键字段
+        batchSize:
+          type: integer
+          default: 500
+        preSql:
+          type: string
+          description: 写入前执行的 SQL
+        postSql:
+          type: string
+          description: 写入后执行的 SQL
+    ElasticsearchLoadConfig:
+      type: object
+      required: [clusterId, index, writeMode]
+      properties:
+        clusterId:
+          type: string
+        index:
+          type: string
+        writeMode:
+          type: string
+          enum: [INDEX, UPSERT, UPDATE]
+          default: UPSERT
+        idField:
+          type: string
+          description: 文档 ID 来源字段
+        bulkSize:
+          type: integer
+          default: 500
+        routingField:
+          type: string
+    MqLoadConfig:
+      type: object
+      required: [clusterId, topic]
+      properties:
+        clusterId:
+          type: string
+        topic:
+          type: string
+        serializer:
+          type: string
+          enum: [JSON, AVRO, PROTOBUF, STRING]
+          default: JSON
+        partitionKey:
+          type: string
+          description: 消息分区键字段
+    # ─────────────────────────────────────────
+    # 通用错误结构
+    # ─────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: PIPELINE_NOT_FOUND
+        message:
+          type: string
+        traceId:
+          type: string
